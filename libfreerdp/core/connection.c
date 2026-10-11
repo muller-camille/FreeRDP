@@ -740,6 +740,126 @@ BOOL rdp_client_reconnect(rdpRdp* rdp)
 	return status;
 }
 
+/**
+ * Fingerprint of the server public key of the standard RDP security layer: hash of its DER
+ * encoding (PKCS#1 RSAPublicKey), as hexadecimal bytes, separated by ':' or not.
+ */
+static char* rdp_server_key_fingerprint(const rdpCertificate* cert, const char* hash,
+                                        BOOL separator)
+{
+	size_t length = 0;
+	const WINPR_MD_TYPE md = winpr_md_type_from_string(hash);
+	switch (md)
+	{
+		case WINPR_MD_SHA1:
+			length = WINPR_SHA1_DIGEST_LENGTH;
+			break;
+		case WINPR_MD_SHA224:
+			length = WINPR_SHA224_DIGEST_LENGTH;
+			break;
+		case WINPR_MD_SHA256:
+			length = WINPR_SHA256_DIGEST_LENGTH;
+			break;
+		case WINPR_MD_SHA384:
+			length = WINPR_SHA384_DIGEST_LENGTH;
+			break;
+		case WINPR_MD_SHA512:
+			length = WINPR_SHA512_DIGEST_LENGTH;
+			break;
+		default:
+			WLog_WARN(TAG, "Unsupported fingerprint hash %s for the server key", hash);
+			return nullptr;
+	}
+
+	BYTE* key = nullptr;
+	DWORD keyLength = 0;
+	if (!freerdp_certificate_get_public_key(cert, &key, &keyLength))
+		return nullptr;
+
+	BYTE digest[WINPR_SHA512_DIGEST_LENGTH] = WINPR_C_ARRAY_INIT;
+	const BOOL hashed = winpr_Digest(md, key, keyLength, digest, sizeof(digest));
+	free(key);
+	if (!hashed)
+		return nullptr;
+
+	char* fp = calloc(length, 3);
+	if (!fp)
+		return nullptr;
+
+	size_t pos = 0;
+	for (size_t x = 0; x < length; x++)
+	{
+		const char* format = (separator && (x + 1 < length)) ? "%02" PRIx8 ":" : "%02" PRIx8;
+		const int rc = sprintf_s(&fp[pos], 3 * length - pos, format, digest[x]);
+		if (rc <= 0)
+		{
+			free(fp);
+			return nullptr;
+		}
+		pos += (size_t)rc;
+	}
+	return fp;
+}
+
+/**
+ * Unlike TLS, the standard RDP security layer does not authenticate the server. When the user
+ * asked for strict checking (/cert:deny), the server key must be one of the accepted fingerprints
+ * (/cert:fingerprint:<hash>:<fingerprint>): its hash of the DER encoded RSA public key. Otherwise
+ * the key is accepted, as before. The key fingerprint is logged, so that it can be pinned.
+ */
+static BOOL rdp_client_check_server_key(rdpRdp* rdp)
+{
+	WINPR_ASSERT(rdp);
+	const rdpSettings* settings = rdp->settings;
+	WINPR_ASSERT(settings);
+
+	if (freerdp_settings_get_bool(settings, FreeRDP_IgnoreCertificate))
+		return TRUE;
+
+	const rdpCertificate* cert = settings->RdpServerCertificate;
+	char* fp = rdp_server_key_fingerprint(cert, "sha256", TRUE);
+	WLog_INFO(TAG, "Standard RDP security server key fingerprint: sha256:%s", fp ? fp : "?");
+	free(fp);
+
+	BOOL accepted = FALSE;
+	const char* fingerprints =
+	    freerdp_settings_get_string(settings, FreeRDP_CertificateAcceptedFingerprints);
+	if (fingerprints)
+	{
+		char* copy = _strdup(fingerprints);
+		if (!copy)
+			return FALSE;
+
+		char* context = nullptr;
+		for (char* cur = strtok_s(copy, ",", &context); cur && !accepted;
+		     cur = strtok_s(nullptr, ",", &context))
+		{
+			char* sep = strchr(cur, ':');
+			if (!sep)
+				continue;
+			*sep++ = '\0';
+			for (int separator = 0; (separator < 2) && !accepted; separator++)
+			{
+				char* key = rdp_server_key_fingerprint(cert, cur, separator != 0);
+				accepted = key && (_stricmp(key, sep) == 0);
+				free(key);
+			}
+		}
+		free(copy);
+	}
+
+	if (accepted)
+		return TRUE;
+
+	if (freerdp_settings_get_bool(settings, FreeRDP_AutoDenyCertificate))
+	{
+		WLog_ERR(TAG, "Standard RDP security server key not accepted (/cert:deny), aborting");
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
 static const BYTE fips_ivec[8] = { 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB, 0xCD, 0xEF };
 
 static BOOL rdp_client_establish_keys(rdpRdp* rdp)
@@ -772,6 +892,13 @@ static BOOL rdp_client_establish_keys(rdpRdp* rdp)
 	if (!info)
 	{
 		WLog_ERR(TAG, "Failed to get rdpCertInfo from RdpServerCertificate");
+		return FALSE;
+	}
+
+	/* Before the client random, and then the credentials, are encrypted with that key. */
+	if (!rdp_client_check_server_key(rdp))
+	{
+		freerdp_set_last_error_log(rdp->context, FREERDP_ERROR_SECURITY_NEGO_CONNECT_FAILED);
 		return FALSE;
 	}
 
