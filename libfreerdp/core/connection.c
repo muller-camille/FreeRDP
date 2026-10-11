@@ -939,6 +939,17 @@ static BOOL rdp_client_establish_keys(rdpRdp* rdp)
 	WINPR_ASSERT(settings);
 	if (!settings->UseRdpSecurityLayer)
 	{
+		/* Standard RDP security with encryption level NONE: nothing authenticates the server nor
+		 * protects what follows (credentials included). Refused when strict checking is asked. */
+		if ((nego_get_selected_protocol(rdp->nego) == PROTOCOL_RDP) &&
+		    freerdp_settings_get_bool(settings, FreeRDP_AutoDenyCertificate) &&
+		    !freerdp_settings_get_bool(settings, FreeRDP_IgnoreCertificate))
+		{
+			WLog_ERR(TAG, "Standard RDP security without encryption refused (/cert:deny), aborting");
+			freerdp_set_last_error_log(rdp->context, FREERDP_ERROR_SECURITY_NEGO_CONNECT_FAILED);
+			return FALSE;
+		}
+
 		/* no RDP encryption */
 		return TRUE;
 	}
