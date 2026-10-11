@@ -108,7 +108,9 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  " * tofu         ... Accept certificate unconditionally on first connect and deny on "
 	  "subsequent connections if the certificate does not match\n"
 	  " * fingerprints ... A list of certificate hashes that are accepted unconditionally for a "
-	  "connection" },
+	  "connection\n"
+	  "With standard RDP security (no TLS), deny and fingerprints apply to the server key: its "
+	  "fingerprint is the hash of the DER encoded RSA public key, logged at connection" },
 #if defined(WITH_FREERDP_DEPRECATED_COMMANDLINE)
 	{ "cert-deny", COMMAND_LINE_VALUE_FLAG, nullptr, nullptr, nullptr, -1, nullptr,
 	  "[DEPRECATED, use /cert:deny] Automatically abort connection for any certificate that can "
