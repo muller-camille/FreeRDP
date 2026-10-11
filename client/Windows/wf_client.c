@@ -331,7 +331,10 @@ static BOOL wf_pre_connect(freerdp* instance)
 		 * handle: the server ends the connection at the first frame (protocol error 303). The
 		 * legacy RemoteApp graphics are drawn on the session surface, shown in ZillaTerm. */
 		if (freerdp_settings_get_bool(settings, FreeRDP_RemoteApplicationMode) &&
-		    !freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE))
+		    (!freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE) ||
+		     /* "Advanced RemoteApp graphics" (INFO_HIDEF_RAIL_SUPPORTED) go through the
+		      * graphics pipeline too. */
+		     !freerdp_settings_set_bool(settings, FreeRDP_HiDefRemoteApp, FALSE)))
 			return FALSE;
 		instance->VerifyX509Certificate = wf_zt_verify_x509;
 		instance->RetryDialog = wf_zt_retry_dialog;
