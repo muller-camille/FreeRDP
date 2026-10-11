@@ -1,0 +1,91 @@
+name: release
+
+# Builds the Windows client (wfreerdp.exe) from the pinned commit of the patches branch (build.sh) and publishes it as
+# a release, with the licenses, BUILD.txt, SHA256SUMS.txt and a signed build provenance attestation (built by this
+# workflow, from this branch): `gh attestation verify wfreerdp.exe --repo muller-camille/FreeRDP`.
+# Runs when build.sh, the toolchain file or this workflow change on this branch. A release already published is left
+# untouched: bump "release" in build.sh to publish a new one.
+on:
+  push:
+    branches: [ci]
+    paths:
+      - build.sh
+      - mingw64.cmake
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Release to publish
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(bash build.sh --tag)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$(bash build.sh --commit)" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release $tag is already published: nothing to do (bump release in build.sh)."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build tools
+        if: steps.release.outputs.exists == 'false'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends mingw-w64 ninja-build
+
+      - name: Build
+        if: steps.release.outputs.exists == 'false'
+        run: bash build.sh
+
+      - name: Checksums
+        if: steps.release.outputs.exists == 'false'
+        working-directory: out
+        run: sha256sum wfreerdp.exe BUILD.txt LICENSE.*.txt | tee SHA256SUMS.txt
+
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        if: steps.release.outputs.exists == 'false'
+        with:
+          subject-path: |
+            out/wfreerdp.exe
+            out/SHA256SUMS.txt
+
+      - name: Publish
+        if: steps.release.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          {
+            echo "Windows client of FreeRDP (wfreerdp.exe), built from commit $COMMIT of the patches branch: a single"
+            echo "statically linked executable, which only uses Windows DLLs."
+            echo
+            echo '```'
+            cat out/BUILD.txt
+            echo '```'
+            echo
+            echo "SHA-256 (SHA256SUMS.txt):"
+            echo
+            echo '```'
+            cat out/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "Build provenance: \`gh attestation verify wfreerdp.exe --repo $GITHUB_REPOSITORY\`"
+          } > notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$COMMIT" --title "$TAG" --notes-file notes.md out/*
