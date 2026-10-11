@@ -130,7 +130,11 @@ static BOOL WLog_ConsoleAppender_WriteMessage(wLog* log, wLogAppender* appender,
 	}
 
 	if (cmessage->Level != WLOG_OFF)
+	{
 		(void)fprintf(fp, "%s%s\n", prefix, cmessage->TextString);
+		/* Written at once even when the stream is a pipe or a file (fully buffered then). */
+		(void)fflush(fp);
+	}
 #endif
 	return TRUE;
 }
