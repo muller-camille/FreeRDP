@@ -316,6 +316,20 @@ static BOOL wf_pre_connect(freerdp* instance)
 		keyboardLayoutId = ENGLISH_UNITED_STATES;
 	if (!freerdp_settings_set_uint32(settings, FreeRDP_KeyboardLayout, keyboardLayoutId))
 		return FALSE;
+
+	/* Remote applications: no graphics pipeline. With it, the server draws each window on a
+	 * surface of its own (RDPGFX_MAP_SURFACE_TO_WINDOW), which this client does not handle: the
+	 * server ends the connection at the first frame (protocol error 303). "Advanced RemoteApp
+	 * graphics" (INFO_HIDEF_RAIL_SUPPORTED) go through the graphics pipeline too. The legacy
+	 * RemoteApp graphics are drawn on the session surface. */
+	if (freerdp_settings_get_bool(settings, FreeRDP_RemoteApplicationMode))
+	{
+		if (!freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE))
+			return FALSE;
+		if (!freerdp_settings_set_bool(settings, FreeRDP_HiDefRemoteApp, FALSE))
+			return FALSE;
+	}
+
 	PubSub_SubscribeChannelConnected(instance->context->pubSub, wf_OnChannelConnectedEventHandler);
 	PubSub_SubscribeChannelDisconnected(instance->context->pubSub,
 	                                    wf_OnChannelDisconnectedEventHandler);
