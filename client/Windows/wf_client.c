@@ -323,11 +323,8 @@ static BOOL wf_pre_connect(freerdp* instance)
 		 * its own pinned certificates; nothing is stored or asked here. */
 		if (!freerdp_settings_set_bool(settings, FreeRDP_ExternalCertificateManagement, TRUE))
 			return FALSE;
-		/* Never the legacy RDP security layer, whatever the options: without TLS, the server
-		 * would not be authenticated (a server refusing TLS ends the connection). */
-		if (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE) ||
-		    !freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, FALSE))
-			return FALSE;
+		/* The legacy RDP security layer (no TLS) only when ZillaTerm allows it, and its server
+		 * key is then always checked by ZillaTerm (rdp_client_establish_keys). */
 		instance->VerifyX509Certificate = wf_zt_verify_x509;
 		instance->RetryDialog = wf_zt_retry_dialog;
 		instance->VerifyCertificateEx = nullptr;

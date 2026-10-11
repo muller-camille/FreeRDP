@@ -34,6 +34,8 @@
  *    certificate (server, redirection or gateway). The connection waits for the answer on
  *    stdin: "accept" or "deny". "zillaterm:connected <window handle>" once connected,
  *    "zillaterm:reconnecting <attempt>" for each automatic reconnection attempt.
+ *    "zillaterm:rdpkey <port> <base64 key> <host>" for the server key of the legacy RDP
+ *    security layer (no TLS), answered like a certificate: never used without "accept".
  *  - stdin, afterwards: "disconnect" ends the session. End of input (ZillaTerm gone) too.
  *
  * In this mode no dialog is ever shown (credentials, certificates, gateway messages), saved

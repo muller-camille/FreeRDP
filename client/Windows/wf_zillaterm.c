@@ -357,8 +357,11 @@ int wf_zt_verify_x509(freerdp* instance, const BYTE* data, size_t length, const 
 
 	InterlockedExchange(&s_answer, -1);
 	(void)ResetEvent(s_answer_event);
-	wf_zt_event("certificate %" PRIu32 " %" PRIu16 " %s %s", (UINT32)flags, port, encoded,
-	            hostname);
+	if (flags & VERIFY_CERT_FLAG_RDP_SECURITY_KEY)
+		wf_zt_event("rdpkey %" PRIu16 " %s %s", port, encoded, hostname);
+	else
+		wf_zt_event("certificate %" PRIu32 " %" PRIu16 " %s %s", (UINT32)flags, port, encoded,
+		            hostname);
 	free(encoded);
 
 	/* Waits for ZillaTerm (its own dialog may be open), the end of input, or an abort. */

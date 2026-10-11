@@ -71,6 +71,9 @@ extern "C"
 #define VERIFY_CERT_FLAG_MISMATCH 0x80
 #define VERIFY_CERT_FLAG_MATCH_LEGACY_SHA1 0x100
 #define VERIFY_CERT_FLAG_FP_IS_PEM 0x200
+/** ZillaTerm: the data is the RSA public key of the legacy RDP security layer, not a certificate:
+ * exponent (4 bytes, little endian) then modulus (little endian), as sent by the server. */
+#define VERIFY_CERT_FLAG_RDP_SECURITY_KEY 0x1000
 
 /* Message types used by gateway messaging callback */
 #define GATEWAY_MESSAGE_CONSENT 1

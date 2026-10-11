@@ -775,6 +775,41 @@ static BOOL rdp_client_establish_keys(rdpRdp* rdp)
 		return FALSE;
 	}
 
+	/* ZillaTerm: the legacy RDP security layer does not authenticate the server. With external
+	 * certificate management, its key is checked by the client (pinning) before the client
+	 * random, and then the credentials, are encrypted with it. */
+	if (freerdp_settings_get_bool(settings, FreeRDP_ExternalCertificateManagement))
+	{
+		freerdp* instance = rdp->context->instance;
+		if (!instance || !instance->VerifyX509Certificate || !info->Modulus ||
+		    (info->ModulusLength == 0) || (info->ModulusLength > 8192))
+		{
+			WLog_ERR(TAG, "RDP security server key cannot be checked, aborting");
+			freerdp_set_last_error_log(rdp->context, FREERDP_ERROR_TLS_CONNECT_FAILED);
+			return FALSE;
+		}
+
+		const size_t keyLength = sizeof(info->exponent) + info->ModulusLength;
+		BYTE* key = calloc(keyLength, 1);
+		if (!key)
+			return FALSE;
+		memcpy(key, info->exponent, sizeof(info->exponent));
+		memcpy(&key[sizeof(info->exponent)], info->Modulus, info->ModulusLength);
+		const char* host = freerdp_settings_get_server_name(settings);
+		const UINT16 port = (UINT16)freerdp_settings_get_uint32(settings, FreeRDP_ServerPort);
+		const int accepted = host ? instance->VerifyX509Certificate(
+		                                instance, key, keyLength, host, port,
+		                                VERIFY_CERT_FLAG_RDP_SECURITY_KEY)
+		                          : 0;
+		free(key);
+		if (accepted != 1)
+		{
+			WLog_ERR(TAG, "RDP security server key not trusted, aborting");
+			freerdp_set_last_error_log(rdp->context, FREERDP_ERROR_TLS_CONNECT_FAILED);
+			return FALSE;
+		}
+	}
+
 	/*
 	 * client random must be (bitlen / 8) + 8 - see [MS-RDPBCGR] 5.3.4.1
 	 * for details
