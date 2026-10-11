@@ -817,6 +817,23 @@ static BOOL wf_rail_monitored_desktop(rdpContext* context, const WINDOW_ORDER_IN
 	wfContext* wfc = (wfContext*)context;
 	RailClientContext* rail = wfc->rail;
 	WLog_DBG(TAG, "RailMonitorDesktop");
+
+	/* Launch the remote application once the server desktop is ready, like the X11 and SDL
+	 * clients (xf_rail_monitored_desktop). */
+	if (rail && (orderInfo->fieldFlags & WINDOW_ORDER_FIELD_DESKTOP_ARC_COMPLETED))
+	{
+		const char* app =
+		    freerdp_settings_get_string(context->settings, FreeRDP_RemoteApplicationProgram);
+		if (app && (strnlen(app, 1) > 0))
+		{
+			const UINT rc = client_rail_server_start_cmd(rail);
+			if (rc != CHANNEL_RC_OK)
+			{
+				WLog_ERR(TAG, "client_rail_server_start_cmd failed with error %" PRIu32 "", rc);
+				return FALSE;
+			}
+		}
+	}
 	return TRUE;
 }
 
@@ -866,28 +883,6 @@ static UINT wf_rail_server_system_param(RailClientContext* context,
                                         const RAIL_SYSPARAM_ORDER* sysparam)
 {
 	return CHANNEL_RC_OK;
-}
-
-/**
- * Function description
- *
- * @return 0 on success, otherwise a Win32 error code
- */
-static UINT wf_rail_server_handshake(RailClientContext* context,
-                                     const RAIL_HANDSHAKE_ORDER* handshake)
-{
-	return client_rail_server_start_cmd(context);
-}
-
-/**
- * Function description
- *
- * @return 0 on success, otherwise a Win32 error code
- */
-static UINT wf_rail_server_handshake_ex(RailClientContext* context,
-                                        const RAIL_HANDSHAKE_EX_ORDER* handshakeEx)
-{
-	return client_rail_server_start_cmd(context);
 }
 
 /**
@@ -980,8 +975,9 @@ BOOL wf_rail_init(wfContext* wfc, RailClientContext* rail)
 	rail->custom = (void*)wfc;
 	rail->ServerExecuteResult = wf_rail_server_execute_result;
 	rail->ServerSystemParam = wf_rail_server_system_param;
-	rail->ServerHandshake = wf_rail_server_handshake;
-	rail->ServerHandshakeEx = wf_rail_server_handshake_ex;
+	/* Keep the channel's ServerHandshake/ServerHandshakeEx: they answer with the client
+	 * handshake, without which the server ends the connection. The application is launched by
+	 * wf_rail_monitored_desktop. */
 	rail->ServerLocalMoveSize = wf_rail_server_local_move_size;
 	rail->ServerMinMaxInfo = wf_rail_server_min_max_info;
 	rail->ServerLanguageBarInfo = wf_rail_server_language_bar_info;
