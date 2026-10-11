@@ -982,7 +982,17 @@ BOOL wf_rail_init(wfContext* wfc, RailClientContext* rail)
 	rail->ServerMinMaxInfo = wf_rail_server_min_max_info;
 	rail->ServerLanguageBarInfo = wf_rail_server_language_bar_info;
 	rail->ServerGetAppIdResponse = wf_rail_server_get_appid_response;
-	wf_rail_register_update_callbacks(context->update);
+	/* Embedded (/parent-window): the remote applications are shown in the session window, as on
+	 * a desktop, instead of in windows of their own on the local desktop: only the desktop orders
+	 * are followed (they launch the application). */
+	if (!freerdp_settings_get_bool(context->settings, FreeRDP_EmbeddedWindow))
+		wf_rail_register_update_callbacks(context->update);
+	else
+	{
+		rdpWindowUpdate* window = context->update->window;
+		window->MonitoredDesktop = wf_rail_monitored_desktop;
+		window->NonMonitoredDesktop = wf_rail_non_monitored_desktop;
+	}
 	wfc->railWindows = HashTable_New(TRUE);
 	return (wfc->railWindows != nullptr);
 }
