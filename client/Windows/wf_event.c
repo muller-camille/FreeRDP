@@ -269,7 +269,9 @@ static BOOL wf_event_process_WM_MOUSEWHEEL(wfContext* wfc, HWND hWnd, UINT Msg, 
 	input = wfc->common.context.input;
 	WINPR_ASSERT(input);
 
-	DefWindowProc(hWnd, Msg, wParam, lParam);
+	/* Embedded: the wheel is not passed on to the parent window, it was meant for the session. */
+	if (!freerdp_settings_get_bool(wfc->common.context.settings, FreeRDP_EmbeddedWindow))
+		DefWindowProc(hWnd, Msg, wParam, lParam);
 	delta = ((signed short)HIWORD(wParam)); /* GET_WHEEL_DELTA_WPARAM(wParam); */
 
 	if (horizontal)
@@ -575,18 +577,25 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 #if (_WIN32_WINNT >= 0x0400) || (_WIN32_WINDOWS > 0x0400)
 
 			case WM_MOUSEWHEEL:
+			{
+				/* The wheel position is in screen coordinates. */
+				POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+				ScreenToClient(hWnd, &pt);
 				wf_event_process_WM_MOUSEWHEEL(wfc, hWnd, Msg, wParam, lParam, FALSE,
-				                               GET_X_LPARAM(lParam) - wfc->offset_x,
-				                               GET_Y_LPARAM(lParam) - wfc->offset_y);
-				break;
+				                               pt.x - wfc->offset_x, pt.y - wfc->offset_y);
+			}
+			break;
 #endif
 #if (_WIN32_WINNT >= 0x0600)
 
 			case WM_MOUSEHWHEEL:
+			{
+				POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+				ScreenToClient(hWnd, &pt);
 				wf_event_process_WM_MOUSEWHEEL(wfc, hWnd, Msg, wParam, lParam, TRUE,
-				                               GET_X_LPARAM(lParam) - wfc->offset_x,
-				                               GET_Y_LPARAM(lParam) - wfc->offset_y);
-				break;
+				                               pt.x - wfc->offset_x, pt.y - wfc->offset_y);
+			}
+			break;
 #endif
 
 			case WM_SETCURSOR:
