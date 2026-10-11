@@ -1562,21 +1562,47 @@ static int wfreerdp_client_start(rdpContext* context)
 	{
 		typedef UINT(WINAPI * GetDpiForWindow_t)(HWND hwnd);
 		typedef BOOL(WINAPI * SetProcessDPIAware_t)(void);
+		typedef HANDLE(WINAPI * GetWindowDpiAwarenessContext_t)(HWND hwnd);
+		typedef int(WINAPI * GetAwarenessFromDpiAwarenessContext_t)(HANDLE value);
+		typedef BOOL(WINAPI * SetProcessDpiAwarenessContext_t)(HANDLE value);
 
 		HMODULE module = GetModuleHandle(_T("User32"));
 		if (module)
 		{
+			/* Same DPI awareness as the parent window (Windows 10 1607 and later): a per
+			 * monitor aware parent and a system aware child are scaled differently by Windows,
+			 * which blurs the session and shifts the pointer position. */
+			GetWindowDpiAwarenessContext_t pGetWindowDpiAwarenessContext = GetProcAddressAs(
+			    module, "GetWindowDpiAwarenessContext", GetWindowDpiAwarenessContext_t);
+			GetAwarenessFromDpiAwarenessContext_t pGetAwarenessFromDpiAwarenessContext =
+			    GetProcAddressAs(module, "GetAwarenessFromDpiAwarenessContext",
+			                     GetAwarenessFromDpiAwarenessContext_t);
+			SetProcessDpiAwarenessContext_t pSetProcessDpiAwarenessContext = GetProcAddressAs(
+			    module, "SetProcessDpiAwarenessContext", SetProcessDpiAwarenessContext_t);
+			BOOL done = FALSE;
+			if (pGetWindowDpiAwarenessContext && pGetAwarenessFromDpiAwarenessContext &&
+			    pSetProcessDpiAwarenessContext)
+			{
+				const HANDLE parentContext = pGetWindowDpiAwarenessContext(hWndParent);
+				/* DPI_AWARENESS_PER_MONITOR_AWARE */
+				if (parentContext && (pGetAwarenessFromDpiAwarenessContext(parentContext) == 2))
+				{
+					/* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, then _PER_MONITOR_AWARE */
+					done = pSetProcessDpiAwarenessContext((HANDLE)(INT_PTR)-4) ||
+					       pSetProcessDpiAwarenessContext((HANDLE)(INT_PTR)-3);
+				}
+			}
+
 			GetDpiForWindow_t pGetDpiForWindow =
 			    GetProcAddressAs(module, "GetDpiForWindow", GetDpiForWindow_t);
 			SetProcessDPIAware_t pSetProcessDPIAware =
 			    GetProcAddressAs(module, "SetProcessDPIAware", SetProcessDPIAware_t);
-			if (pGetDpiForWindow && pSetProcessDPIAware)
+			if (!done && pGetDpiForWindow && pSetProcessDPIAware)
 			{
 				const UINT dpiAwareness = pGetDpiForWindow(hWndParent);
 				if (dpiAwareness != USER_DEFAULT_SCREEN_DPI)
 					pSetProcessDPIAware();
 			}
-			FreeLibrary(module);
 		}
 	}
 
