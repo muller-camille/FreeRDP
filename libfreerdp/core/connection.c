@@ -740,12 +740,63 @@ BOOL rdp_client_reconnect(rdpRdp* rdp)
 	return status;
 }
 
+/* DER length of a content of this size. */
+static size_t rdp_der_length_size(size_t length)
+{
+	if (length < 0x80)
+		return 1;
+	if (length <= 0xFF)
+		return 2;
+	return 3;
+}
+
+static BYTE* rdp_der_write_length(BYTE* p, size_t length)
+{
+	if (length < 0x80)
+		*p++ = (BYTE)length;
+	else if (length <= 0xFF)
+	{
+		*p++ = 0x81;
+		*p++ = (BYTE)length;
+	}
+	else
+	{
+		*p++ = 0x82;
+		*p++ = (BYTE)(length >> 8);
+		*p++ = (BYTE)(length & 0xFF);
+	}
+	return p;
+}
+
+/* DER INTEGER content length of a little endian unsigned number (minimal, positive). */
+static size_t rdp_der_integer_size(const BYTE* le, size_t length)
+{
+	while ((length > 1) && (le[length - 1] == 0))
+		length--;
+	return length + (((le[length - 1] & 0x80) != 0) ? 1 : 0);
+}
+
+static BYTE* rdp_der_write_integer(BYTE* p, const BYTE* le, size_t length)
+{
+	while ((length > 1) && (le[length - 1] == 0))
+		length--;
+	const size_t size = rdp_der_integer_size(le, length);
+	*p++ = 0x02;
+	p = rdp_der_write_length(p, size);
+	if (size > length)
+		*p++ = 0x00;
+	for (size_t x = 0; x < length; x++)
+		*p++ = le[length - 1 - x];
+	return p;
+}
+
 /**
  * Fingerprint of the server public key of the standard RDP security layer: hash of its DER
- * encoding (PKCS#1 RSAPublicKey), as hexadecimal bytes, separated by ':' or not.
+ * encoding (PKCS#1 RSAPublicKey: modulus and public exponent, big endian), as hexadecimal bytes,
+ * separated by ':' or not. The key is kept little endian in rdpCertInfo, whether it came from a
+ * proprietary certificate or an X.509 one.
  */
-static char* rdp_server_key_fingerprint(const rdpCertificate* cert, const char* hash,
-                                        BOOL separator)
+static char* rdp_server_key_fingerprint(const rdpCertInfo* info, const char* hash, BOOL separator)
 {
 	size_t length = 0;
 	const WINPR_MD_TYPE md = winpr_md_type_from_string(hash);
@@ -771,14 +822,28 @@ static char* rdp_server_key_fingerprint(const rdpCertificate* cert, const char* 
 			return nullptr;
 	}
 
-	BYTE* key = nullptr;
-	DWORD keyLength = 0;
-	if (!freerdp_certificate_get_public_key(cert, &key, &keyLength))
+	if (!info || !info->Modulus || (info->ModulusLength == 0) || (info->ModulusLength > 8192))
 		return nullptr;
 
+	const size_t modulus = rdp_der_integer_size(info->Modulus, info->ModulusLength);
+	const size_t exponent = rdp_der_integer_size(info->exponent, sizeof(info->exponent));
+	const size_t content = 1 + rdp_der_length_size(modulus) + modulus + 1 +
+	                       rdp_der_length_size(exponent) + exponent;
+	const size_t total = 1 + rdp_der_length_size(content) + content;
+	BYTE* der = calloc(total, 1);
+	if (!der)
+		return nullptr;
+
+	BYTE* p = der;
+	*p++ = 0x30;
+	p = rdp_der_write_length(p, content);
+	p = rdp_der_write_integer(p, info->Modulus, info->ModulusLength);
+	p = rdp_der_write_integer(p, info->exponent, sizeof(info->exponent));
+	WINPR_ASSERT((size_t)(p - der) == total);
+
 	BYTE digest[WINPR_SHA512_DIGEST_LENGTH] = WINPR_C_ARRAY_INIT;
-	const BOOL hashed = winpr_Digest(md, key, keyLength, digest, sizeof(digest));
-	free(key);
+	const BOOL hashed = winpr_Digest(md, der, total, digest, sizeof(digest));
+	free(der);
 	if (!hashed)
 		return nullptr;
 
@@ -816,8 +881,8 @@ static BOOL rdp_client_check_server_key(rdpRdp* rdp)
 	if (freerdp_settings_get_bool(settings, FreeRDP_IgnoreCertificate))
 		return TRUE;
 
-	const rdpCertificate* cert = settings->RdpServerCertificate;
-	char* fp = rdp_server_key_fingerprint(cert, "sha256", TRUE);
+	const rdpCertInfo* info = freerdp_certificate_get_info(settings->RdpServerCertificate);
+	char* fp = rdp_server_key_fingerprint(info, "sha256", TRUE);
 	WLog_INFO(TAG, "Standard RDP security server key fingerprint: sha256:%s", fp ? fp : "?");
 	free(fp);
 
@@ -840,7 +905,7 @@ static BOOL rdp_client_check_server_key(rdpRdp* rdp)
 			*sep++ = '\0';
 			for (int separator = 0; (separator < 2) && !accepted; separator++)
 			{
-				char* key = rdp_server_key_fingerprint(cert, cur, separator != 0);
+				char* key = rdp_server_key_fingerprint(info, cur, separator != 0);
 				accepted = key && (_stricmp(key, sep) == 0);
 				free(key);
 			}
