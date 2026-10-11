@@ -60,6 +60,12 @@ INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	WINPR_UNUSED(lpCmdLine);
 	WINPR_UNUSED(nCmdShow);
 
+	/* Libraries loaded at run time (channel add-ins, delay-loaded system libraries) are looked
+	 * for in the application directory and System32 only, never in the current directory or the
+	 * PATH, where anyone may have dropped a library of the same name. */
+	if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS))
+		return -1;
+
 	RdpClientEntry(&clientEntryPoints);
 	context = freerdp_client_context_new(&clientEntryPoints);
 
