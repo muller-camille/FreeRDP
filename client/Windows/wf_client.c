@@ -63,6 +63,7 @@
 #include "wf_rail.h"
 #include "wf_channels.h"
 #include "wf_graphics.h"
+#include "wf_zillaterm.h"
 
 #include "resource/resource.h"
 
@@ -316,6 +317,23 @@ static BOOL wf_pre_connect(freerdp* instance)
 		keyboardLayoutId = ENGLISH_UNITED_STATES;
 	if (!freerdp_settings_set_uint32(settings, FreeRDP_KeyboardLayout, keyboardLayoutId))
 		return FALSE;
+	if (wf_zt_enabled())
+	{
+		/* ZillaTerm checks every certificate (server, redirection, gateway) with Windows and
+		 * its own pinned certificates; nothing is stored or asked here. */
+		if (!freerdp_settings_set_bool(settings, FreeRDP_ExternalCertificateManagement, TRUE))
+			return FALSE;
+		/* Never the legacy RDP security layer, whatever the options: without TLS, the server
+		 * would not be authenticated (a server refusing TLS ends the connection). */
+		if (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE) ||
+		    !freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, FALSE))
+			return FALSE;
+		instance->VerifyX509Certificate = wf_zt_verify_x509;
+		instance->RetryDialog = wf_zt_retry_dialog;
+		instance->VerifyCertificateEx = nullptr;
+		instance->VerifyChangedCertificateEx = nullptr;
+	}
+
 	PubSub_SubscribeChannelConnected(instance->context->pubSub, wf_OnChannelConnectedEventHandler);
 	PubSub_SubscribeChannelDisconnected(instance->context->pubSub,
 	                                    wf_OnChannelDisconnectedEventHandler);
@@ -504,6 +522,7 @@ static BOOL wf_post_connect(freerdp* instance)
 	                                freerdp_settings_get_uint32(settings, FreeRDP_Floatbar));
 
 	wf_event_focus_in(wfc);
+	wf_zt_event("connected %llu", (unsigned long long)(UINT_PTR)wfc->hwnd);
 
 	return TRUE;
 }
@@ -544,6 +563,22 @@ static BOOL wf_authenticate_ex(freerdp* instance, char** username, char** passwo
 	WINPR_ASSERT(username);
 	WINPR_ASSERT(domain);
 	WINPR_ASSERT(password);
+
+	/* ZillaTerm: never prompt. TLS or RDP security goes on with what was given (the server then
+	 * shows its own logon screen); NLA, a gateway or a smart card need what ZillaTerm passed. */
+	if (wf_zt_enabled())
+	{
+		switch (reason)
+		{
+			case AUTH_TLS:
+			case AUTH_RDP:
+				if (!(*password))
+					*password = _strdup("");
+				return (*password != nullptr);
+			default:
+				return (*username && *password);
+		}
+	}
 
 	/* /from-stdin: delegate to the common CLI handler instead of prompting via GUI.
 	 * Settings are fully parsed by the time auth callbacks fire, so this branch
@@ -1041,6 +1076,10 @@ static BOOL wf_present_gateway_message(freerdp* instance, UINT32 type, BOOL isDi
 	if (!isDisplayMandatory && !isConsentMandatory)
 		return TRUE;
 
+	/* ZillaTerm: no dialog; a consent that must be given ends the connection. */
+	if (wf_zt_enabled())
+		return !isConsentMandatory;
+
 	/* special handling for consent messages (show modal dialog) */
 	if (type == GATEWAY_MESSAGE_CONSENT && isConsentMandatory)
 	{
@@ -1501,8 +1540,18 @@ static int wfreerdp_client_start(rdpContext* context)
 	{
 		typedef UINT(WINAPI * GetDpiForWindow_t)(HWND hwnd);
 		typedef BOOL(WINAPI * SetProcessDPIAware_t)(void);
+		typedef BOOL(WINAPI * SetProcessDpiAwarenessContext_t)(HANDLE value);
 
 		HMODULE module = GetModuleHandle(_T("User32"));
+		/* ZillaTerm: same DPI awareness as the parent window (per monitor, v2). */
+		SetProcessDpiAwarenessContext_t pSetProcessDpiAwarenessContext =
+		    module ? GetProcAddressAs(module, "SetProcessDpiAwarenessContext",
+		                              SetProcessDpiAwarenessContext_t)
+		           : nullptr;
+		if (pSetProcessDpiAwarenessContext &&
+		    pSetProcessDpiAwarenessContext((HANDLE)(INT_PTR)-4 /* PER_MONITOR_AWARE_V2 */))
+			module = nullptr;
+
 		if (module)
 		{
 			GetDpiForWindow_t pGetDpiForWindow =

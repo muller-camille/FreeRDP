@@ -40,6 +40,8 @@ set(${MODULE_PREFIX}_SRCS
     wf_floatbar.h
     wf_defaults.h
     wf_defaults.c
+    wf_zillaterm.c
+    wf_zillaterm.h
     resource/wfreerdp.rc
     resource/resource.h
 )

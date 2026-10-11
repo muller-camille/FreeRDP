@@ -375,9 +375,7 @@ PVIRTUALCHANNELENTRY freerdp_load_channel_addin_entry(LPCSTR pszName, LPCSTR psz
 	if (freerdp_load_static_channel_addin_entry)
 		entry = freerdp_load_static_channel_addin_entry(pszName, pszSubsystem, pszType, dwFlags);
 
-	if (!entry)
-		entry = freerdp_load_dynamic_channel_addin_entry(pszName, pszSubsystem, pszType, dwFlags);
-
+	/* ZillaTerm build: every channel it uses is built in, no library is ever loaded. */
 	if (!entry)
 		WLog_WARN(TAG, "Failed to load channel %s [%s]", pszName, pszSubsystem);
 
