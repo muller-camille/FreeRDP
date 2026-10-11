@@ -1409,6 +1409,52 @@ void wf_size_scrollbars(wfContext* wfc, UINT32 client_width, UINT32 client_heigh
 	wf_update_canvas_diff(wfc);
 }
 
+/**
+ * Automatic reconnection: the common callback decides whether to try again and how long to wait
+ * first. The wait happens here instead of in the caller's Sleep loop, so that the messages sent to
+ * the session window are still answered (the window does not appear hung) and closing the window
+ * or cancelling the connection stops the reconnection at once.
+ */
+static SSIZE_T wf_retry_dialog(freerdp* instance, const char* what, size_t current, void* userarg)
+{
+	WINPR_ASSERT(instance);
+
+	const SSIZE_T delay = client_common_retry_dialog(instance, what, current, userarg);
+	if ((delay < 0) || (current == 0))
+		return delay;
+
+	rdpContext* context = instance->context;
+	const wfContext* wfc = (const wfContext*)context;
+	HANDLE abort = freerdp_abort_event(context);
+	const DWORD count = abort ? 1 : 0;
+	const ULONGLONG end = GetTickCount64() + (ULONGLONG)delay;
+	for (;;)
+	{
+		MSG msg = WINPR_C_ARRAY_INIT;
+		if (PeekMessage(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE) ||
+		    (wfc->hwnd && PeekMessage(&msg, wfc->hwnd, WM_CLOSE, WM_CLOSE, PM_REMOVE)))
+		{
+			WLog_INFO(TAG, "Window closed, automatic reconnection cancelled");
+			(void)freerdp_abort_connect_context(context);
+			return -1;
+		}
+
+		const ULONGLONG now = GetTickCount64();
+		if (now >= end)
+			break;
+
+		const DWORD status = MsgWaitForMultipleObjects(count, &abort, FALSE, (DWORD)(end - now),
+		                                               QS_SENDMESSAGE | QS_POSTMESSAGE);
+		if (((count == 1) && (status == WAIT_OBJECT_0)) || (status == WAIT_FAILED))
+			return -1;
+
+		/* Answers the messages sent to the window; posted ones wait for the session. */
+		(void)PeekMessage(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+	}
+
+	return 0;
+}
+
 static BOOL wfreerdp_client_global_init(void)
 {
 	WSADATA wsaData;
@@ -1457,6 +1503,7 @@ static BOOL wfreerdp_client_new(freerdp* instance, rdpContext* context)
 	instance->PostConnect = wf_post_connect;
 	instance->PostDisconnect = wf_post_disconnect;
 	instance->AuthenticateEx = wf_authenticate_ex;
+	instance->RetryDialog = wf_retry_dialog;
 	instance->GetAccessToken = client_failsafe_get_access_token;
 
 #ifdef WITH_WINDOWS_CERT_STORE
