@@ -119,20 +119,34 @@ LRESULT CALLBACK wf_ll_kbd_proc(int nCode, WPARAM wParam, LPARAM lParam)
 					return 1;
 
 				input = wfc->common.context.input;
-				rdp_scancode = MAKE_RDP_SCANCODE((BYTE)p->scanCode, p->flags & LLKHF_EXTENDED);
-				keystate = g_keystates[p->scanCode & 0xFF];
-
-				switch (wParam)
 				{
-					case WM_KEYDOWN:
-					case WM_SYSKEYDOWN:
-						g_keystates[p->scanCode & 0xFF] = TRUE;
-						break;
-					case WM_KEYUP:
-					case WM_SYSKEYUP:
-					default:
-						g_keystates[p->scanCode & 0xFF] = FALSE;
-						break;
+					/* ZillaTerm: keys injected without a scan code (auto-type, on-screen keyboards)
+					 * get the one of their virtual key, instead of an empty one. */
+					DWORD scanCode = p->scanCode;
+					DWORD extended = p->flags & LLKHF_EXTENDED;
+					if ((scanCode == 0) && (p->vkCode != 0) && (p->vkCode != VK_PACKET))
+					{
+						const UINT code = MapVirtualKeyW(p->vkCode, MAPVK_VK_TO_VSC_EX);
+						scanCode = code & 0xFF;
+						if ((code & 0xFF00) == 0xE000)
+							extended = LLKHF_EXTENDED;
+					}
+
+					rdp_scancode = MAKE_RDP_SCANCODE((BYTE)scanCode, extended);
+					keystate = g_keystates[scanCode & 0xFF];
+
+					switch (wParam)
+					{
+						case WM_KEYDOWN:
+						case WM_SYSKEYDOWN:
+							g_keystates[scanCode & 0xFF] = TRUE;
+							break;
+						case WM_KEYUP:
+						case WM_SYSKEYUP:
+						default:
+							g_keystates[scanCode & 0xFF] = FALSE;
+							break;
+					}
 				}
 				DEBUG_KBD("keydown %d scanCode 0x%08lX flags 0x%08lX vkCode 0x%08lX",
 				          (wParam == WM_KEYDOWN), p->scanCode, p->flags, p->vkCode);
