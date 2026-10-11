@@ -24,6 +24,11 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <stdio.h>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 #include <winpr/assert.h>
 #include <winpr/string.h>
@@ -648,7 +653,7 @@ BOOL freerdp_client_print_command_line_help_ex(int argc, char** argv,
 	printf("%s - A Free Remote Desktop Protocol Implementation\n", name);
 	printf("See www.freerdp.com for more information\n");
 	printf("\n");
-	printf("Usage: %s [file] [options] [/v:<server>[:port]]\n", argv[0]);
+	printf("Usage: %s [file|-] [options] [/v:<server>[:port]]\n", argv[0]);
 	printf("\n");
 	printf("Syntax:\n");
 	printf("    /flag (enables flag)\n");
@@ -662,6 +667,7 @@ BOOL freerdp_client_print_command_line_help_ex(int argc, char** argv,
 	printf("\n");
 	printf("Examples:\n");
 	printf("    %s connection.rdp /p:Pwd123! /f\n", name);
+	printf("    %s - /f < connection.rdp (connection file read from standard input)\n", name);
 	printf("    %s /u:CONTOSO\\JohnDoe /p:Pwd123! /v:rdp.contoso.com\n", name);
 	printf("    %s /u:JohnDoe /p:Pwd123! /w:1366 /h:768 /v:192.168.1.100:4489\n", name);
 	printf("    %s /u:JohnDoe /p:Pwd123! /vmconnect:C824F53E-95D2-46C6-9A18-23A5BB403532 "
@@ -728,6 +734,51 @@ static BOOL option_is_rdp_file(const char* option)
 	return FALSE;
 }
 
+/* "-": the connection file is read from standard input, so that a file holding credentials or
+ * one-time tokens never has to be written to disk. */
+static BOOL option_is_stdin_file(const char* option)
+{
+	WINPR_ASSERT(option);
+
+	return (strcmp(option, "-") == 0);
+}
+
+#define CONNECTION_FILE_STDIN_MAX (1024 * 1024)
+
+static int freerdp_client_settings_parse_connection_file_stdin(rdpSettings* settings)
+{
+	int rc = -1;
+	size_t size = 0;
+	BYTE* buffer = malloc(CONNECTION_FILE_STDIN_MAX);
+	if (!buffer)
+		return -1;
+
+#if defined(_WIN32)
+	/* Read as is: a UTF-16 file may hold 0x1A (end of file in text mode) or CR/LF bytes. */
+	(void)_setmode(_fileno(stdin), _O_BINARY);
+#endif
+	while (size < CONNECTION_FILE_STDIN_MAX)
+	{
+		const size_t got = fread(&buffer[size], 1, CONNECTION_FILE_STDIN_MAX - size, stdin);
+		if (got == 0)
+			break;
+		size += got;
+	}
+
+	if (ferror(stdin))
+		WLog_ERR(TAG, "Failed to read the connection file from standard input");
+	else if (!feof(stdin))
+		WLog_ERR(TAG, "Connection file read from standard input is larger than %d bytes",
+		         CONNECTION_FILE_STDIN_MAX);
+	else
+		rc = freerdp_client_settings_parse_connection_file_buffer(settings, buffer, size);
+
+	/* It may hold credentials. */
+	memset(buffer, 0, size);
+	free(buffer);
+	return rc;
+}
+
 static BOOL option_is_incident_file(const char* option)
 {
 	WINPR_ASSERT(option);
@@ -744,6 +795,9 @@ static int freerdp_client_command_line_pre_filter(void* context, int index, int 
 
 		if (argc <= index)
 			return -1;
+
+		if (option_is_stdin_file(argv[index]))
+			return 1;
 
 		length = strlen(argv[index]);
 
@@ -5753,7 +5807,7 @@ static int freerdp_client_settings_parse_command_line_arguments_int(
 	 * legacy command line syntax. */
 	if (argc > 1)
 	{
-		ext = option_is_rdp_file(argv[1]);
+		ext = option_is_rdp_file(argv[1]) || option_is_stdin_file(argv[1]);
 		assist = option_is_incident_file(argv[1]);
 	}
 
@@ -5782,7 +5836,10 @@ static int freerdp_client_settings_parse_command_line_arguments_int(
 
 	if (ext)
 	{
-		if (freerdp_client_settings_parse_connection_file(settings, argv[1]))
+		const int rc = option_is_stdin_file(argv[1])
+		                   ? freerdp_client_settings_parse_connection_file_stdin(settings)
+		                   : freerdp_client_settings_parse_connection_file(settings, argv[1]);
+		if (rc)
 			return COMMAND_LINE_ERROR_UNEXPECTED_VALUE;
 	}
 
