@@ -44,6 +44,8 @@ static HWND g_main_hWnd = nullptr;
 static HWND g_parent_hWnd = nullptr;
 
 #define RESIZE_MIN_DELAY 200 /* minimum delay in ms between two resizes */
+#define RESIZE_RETRY_DELAY 2000 /* delay in ms before sending a size again */
+#define RESIZE_RETRIES 10       /* sizes sent again at most while the remote desktop does not follow */
 
 static BOOL wf_scale_blt(wfContext* wfc, HDC hdc, int x, int y, int w, int h, HDC hdcSrc, int x1,
                          int y1, DWORD rop);
@@ -486,7 +488,10 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 					 * WM_EXITSIZEMOVE: send the new size once the parent stops resizing it. */
 					if (wfc->hWndParent &&
 					    freerdp_settings_get_bool(settings, FreeRDP_DynamicResolutionUpdate))
+					{
+						wfc->dynamicResolutionRetries = 0;
 						SetTimer(hWnd, WF_TIMER_DYNAMIC_RESOLUTION, RESIZE_MIN_DELAY, nullptr);
+					}
 				}
 				else
 				{
@@ -542,16 +547,32 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 				}
 
 				KillTimer(hWnd, WF_TIMER_DYNAMIC_RESOLUTION);
-				WLog_DBG(TAG, "dynamic resolution: window %dx%d, remote desktop %" PRIu32 "x%" PRIu32,
-				         wfc->client_width, wfc->client_height,
-				         freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth),
-				         freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight));
-				if ((wfc->client_width > 0) && (wfc->client_height > 0) &&
-				    (((wfc->client_width & ~1) !=
-				      (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth)) ||
-				     (wfc->client_height !=
-				      (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight))))
+				{
+					/* Size sent for this window ([MS-RDPEDISP] limits, see wf_send_resize). */
+					const int width = MAX(200, MIN(8192, wfc->client_width)) & ~1;
+					const int height = MAX(200, MIN(8192, wfc->client_height));
+					WLog_DBG(TAG,
+					         "dynamic resolution: window %dx%d, remote desktop %" PRIu32 "x%" PRIu32,
+					         wfc->client_width, wfc->client_height,
+					         freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth),
+					         freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight));
+					if ((wfc->client_width <= 0) || (wfc->client_height <= 0) ||
+					    ((width == (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth)) &&
+					     (height ==
+					      (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight))))
+						break;
+
+					/* A layout received while the session is still being opened or reconnected
+					 * can be overridden by the server: send it again while the remote desktop
+					 * does not follow. */
+					if ((wfc->dynamicResolutionRetries > 0) &&
+					    (!freerdp_settings_set_uint32(settings, FreeRDP_SmartSizingWidth, 0) ||
+					     !freerdp_settings_set_uint32(settings, FreeRDP_SmartSizingHeight, 0)))
+						break;
 					wf_send_resize(wfc);
+					if (wfc->disp && (wfc->dynamicResolutionRetries++ < RESIZE_RETRIES))
+						SetTimer(hWnd, WF_TIMER_DYNAMIC_RESOLUTION, RESIZE_RETRY_DELAY, nullptr);
+				}
 				break;
 
 			case WM_ERASEBKGND:

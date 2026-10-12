@@ -193,6 +193,9 @@ static BOOL wf_desktop_resize(rdpContext* context)
 		return FALSE;
 
 	settings = context->settings;
+	WLog_DBG(TAG, "remote desktop %" PRIu32 "x%" PRIu32,
+	         freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth),
+	         freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight));
 
 	if (wfc->primary)
 	{
