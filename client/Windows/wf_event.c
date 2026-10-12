@@ -41,7 +41,6 @@ static HWND g_main_hWnd = nullptr;
 static HWND g_parent_hWnd = nullptr;
 
 #define RESIZE_MIN_DELAY 200 /* minimum delay in ms between two resizes */
-#define WF_TIMER_DYNAMIC_RESOLUTION 0x7246 /* embedded window resized by its parent */
 
 static BOOL wf_scale_blt(wfContext* wfc, HDC hdc, int x, int y, int w, int h, HDC hdcSrc, int x1,
                          int y1, DWORD rop);
@@ -381,9 +380,14 @@ static void wf_send_resize(wfContext* wfc)
 				{
 					WLog_ERR("", "SendMonitorLayout failed.");
 				}
-				(void)freerdp_settings_set_uint32(settings, FreeRDP_SmartSizingWidth, targetWidth);
-				(void)freerdp_settings_set_uint32(settings, FreeRDP_SmartSizingHeight,
-				                                  targetHeight);
+				else
+				{
+					/* Only a layout actually sent: a failed one is sent again on the next resize. */
+					(void)freerdp_settings_set_uint32(settings, FreeRDP_SmartSizingWidth,
+					                                  targetWidth);
+					(void)freerdp_settings_set_uint32(settings, FreeRDP_SmartSizingHeight,
+					                                  targetHeight);
+				}
 			}
 			wfc->lastSentDate = GetTickCount64();
 		}
@@ -520,15 +524,20 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 					break;
 				}
 
-				/* Still within the delay between two resizes: try again later. */
+				/* Still within the delay between two resizes: try again later (the message can
+				 * also be posted once the display control channel is ready, without a timer). */
 				if (GetTickCount64() - wfc->lastSentDate <= RESIZE_MIN_DELAY)
+				{
+					SetTimer(hWnd, WF_TIMER_DYNAMIC_RESOLUTION, RESIZE_MIN_DELAY, nullptr);
 					break;
+				}
 
 				KillTimer(hWnd, WF_TIMER_DYNAMIC_RESOLUTION);
-				if (((wfc->client_width & ~1) !=
-				     (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth)) ||
-				    (wfc->client_height !=
-				     (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight)))
+				if ((wfc->client_width > 0) && (wfc->client_height > 0) &&
+				    (((wfc->client_width & ~1) !=
+				      (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth)) ||
+				     (wfc->client_height !=
+				      (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight))))
 					wf_send_resize(wfc);
 				break;
 
