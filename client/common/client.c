@@ -1529,6 +1529,15 @@ static BOOL client_auto_reconnect_do(freerdp* instance, BOOL retry, UINT32 numRe
 			WLog_WARN(TAG, "Autoreconnect aborted by user");
 			return FALSE;
 		}
+		/* With /cert:deny an unknown certificate or key is refused without asking: another
+		 * server answers at this address, and no later attempt can accept it either. */
+		if (((err == FREERDP_ERROR_TLS_CONNECT_FAILED) ||
+		     (err == FREERDP_ERROR_SECURITY_NEGO_CONNECT_FAILED)) &&
+		    freerdp_settings_get_bool(instance->context->settings, FreeRDP_AutoDenyCertificate))
+		{
+			WLog_WARN(TAG, "Autoreconnect aborted: server certificate or key refused");
+			return FALSE;
+		}
 
 		for (SSIZE_T x = 0; x < delay / 10; x++)
 			Sleep(10);
