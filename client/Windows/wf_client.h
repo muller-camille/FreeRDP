@@ -140,6 +140,7 @@ extern "C"
 
 		DispClientContext* disp;
 		UINT64 lastSentDate;
+		UINT32 dynamicResolutionRetries;
 		BOOL wasMaximized;
 	};
 
