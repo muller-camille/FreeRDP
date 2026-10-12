@@ -142,6 +142,9 @@ extern "C"
 		UINT64 lastSentDate;
 		UINT32 dynamicResolutionRetries;
 		BOOL wasMaximized;
+
+		/* Automatic reconnection in progress (see wf_auto_reconnect): no session for input. */
+		volatile LONG reconnecting;
 	};
 
 	/**

@@ -1087,6 +1087,114 @@ static BOOL wf_present_gateway_message(freerdp* instance, UINT32 type, BOOL isDi
 	return TRUE;
 }
 
+typedef struct
+{
+	freerdp* instance;
+	BOOL result;
+} wf_reconnect_t;
+
+static DWORD WINAPI wf_reconnect_thread(LPVOID arg)
+{
+	wf_reconnect_t* reconnect = (wf_reconnect_t*)arg;
+	WINPR_ASSERT(reconnect);
+
+	reconnect->result = client_auto_reconnect(reconnect->instance);
+	return 0;
+}
+
+/* Keyboard and mouse input. */
+static BOOL wf_is_input_message(UINT message)
+{
+	return ((message >= WM_KEYFIRST) && (message <= WM_KEYLAST)) ||
+	       ((message >= WM_MOUSEFIRST) && (message <= WM_MOUSELAST)) ||
+	       ((message >= WM_NCMOUSEMOVE) && (message <= WM_NCXBUTTONDBLCLK)) ||
+	       (message == WM_INPUT) || (message == WM_MOUSEHOVER) || (message == WM_MOUSELEAVE) ||
+	       (message == WM_NCMOUSEHOVER) || (message == WM_NCMOUSELEAVE);
+}
+
+static BOOL CALLBACK wf_invalidate_window(HWND hwnd, LPARAM lParam)
+{
+	WINPR_UNUSED(lParam);
+	(void)InvalidateRect(hwnd, nullptr, FALSE);
+	return TRUE;
+}
+
+/**
+ * Automatic reconnection on its own thread, while this thread, which owns the session window,
+ * keeps taking its messages. An embedded window (/parent-window) shares its input queue with the
+ * window of the parent application: a window that stops taking its messages during the attempts
+ * (name resolution, connection timeout, delay between attempts) also freezes the parent
+ * application, for as long as the network is away.
+ * Meanwhile there is no session: input is dropped, the window is painted plain (its picture is
+ * being replaced by the reconnection thread) and closing it cancels the reconnection.
+ */
+static BOOL wf_auto_reconnect(wfContext* wfc)
+{
+	WINPR_ASSERT(wfc);
+
+	rdpContext* context = &wfc->common.context;
+	wf_reconnect_t reconnect = { .instance = context->instance, .result = FALSE };
+
+	(void)InterlockedExchange(&wfc->reconnecting, TRUE);
+	HANDLE thread = CreateThread(nullptr, 0, wf_reconnect_thread, &reconnect, 0, nullptr);
+	if (!thread)
+	{
+		(void)InterlockedExchange(&wfc->reconnecting, FALSE);
+		return client_auto_reconnect(context->instance);
+	}
+
+	BOOL closed = FALSE;
+	while (MsgWaitForMultipleObjects(1, &thread, FALSE, INFINITE, QS_ALLINPUT) == WAIT_OBJECT_0 + 1)
+	{
+		/* Messages sent to the window (by the parent too) are answered within PeekMessage. */
+		MSG msg = WINPR_C_ARRAY_INIT;
+		while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
+		{
+			if ((msg.message == WM_QUIT) || ((msg.message == WM_CLOSE) && (msg.hwnd == wfc->hwnd)))
+			{
+				if (!closed)
+					WLog_INFO(TAG, "Window closed, automatic reconnection cancelled");
+				closed = TRUE;
+				(void)freerdp_abort_connect_context(context);
+			}
+			else if (msg.message == WM_PAINT)
+			{
+				PAINTSTRUCT ps = WINPR_C_ARRAY_INIT;
+				HDC hdc = BeginPaint(msg.hwnd, &ps);
+				if (hdc)
+				{
+					(void)FillRect(hdc, &ps.rcPaint, (HBRUSH)GetStockObject(GRAY_BRUSH));
+					(void)EndPaint(msg.hwnd, &ps);
+				}
+			}
+			else if (wf_is_input_message(msg.message) || (msg.message == WM_TIMER))
+			{
+				/* No session to send input or a new size to: the timer fires again later. */
+			}
+			else
+			{
+				/* Size set by the parent of an embedded window, as in wf_client_thread. */
+				if ((msg.message == WM_SIZE) && (msg.hwnd == wfc->hwnd))
+					(void)SetWindowPos(wfc->hwnd, HWND_TOP, 0, 0, LOWORD(msg.lParam),
+					                   HIWORD(msg.lParam), SWP_FRAMECHANGED);
+				(void)DispatchMessage(&msg);
+			}
+		}
+	}
+
+	(void)WaitForSingleObject(thread, INFINITE);
+	(void)CloseHandle(thread);
+	(void)InterlockedExchange(&wfc->reconnecting, FALSE);
+	if (!reconnect.result || closed)
+		return FALSE;
+
+	/* Painted plain meanwhile: the session window and its RemoteApp windows are drawn again. */
+	if (wfc->hwnd)
+		(void)InvalidateRect(wfc->hwnd, nullptr, FALSE);
+	(void)EnumThreadWindows(GetCurrentThreadId(), wf_invalidate_window, 0);
+	return TRUE;
+}
+
 static DWORD WINAPI wf_client_thread(LPVOID lpParam)
 {
 	MSG msg = WINPR_C_ARRAY_INIT;
@@ -1148,7 +1256,7 @@ static DWORD WINAPI wf_client_thread(LPVOID lpParam)
 		{
 			if (!freerdp_check_event_handles(context))
 			{
-				if (client_auto_reconnect(instance))
+				if (wf_auto_reconnect(wfc))
 					continue;
 
 				WLog_ERR(TAG, "Failed to check FreeRDP file descriptor");
@@ -1422,9 +1530,10 @@ void wf_size_scrollbars(wfContext* wfc, UINT32 client_width, UINT32 client_heigh
 
 /**
  * Automatic reconnection: the common callback decides whether to try again and how long to wait
- * first. The wait happens here instead of in the caller's Sleep loop, so that the messages sent to
- * the session window are still answered (the window does not appear hung) and closing the window
- * or cancelling the connection stops the reconnection at once.
+ * first. The caller sleeps the returned delay after a failed attempt without checking anything:
+ * the delay is waited here instead, before the next attempt, so that closing the window (abort
+ * event, see wf_auto_reconnect) stops the reconnection at once. The first attempt is made right
+ * away.
  */
 static SSIZE_T wf_retry_dialog(freerdp* instance, const char* what, size_t current, void* userarg)
 {
@@ -1436,41 +1545,17 @@ static SSIZE_T wf_retry_dialog(freerdp* instance, const char* what, size_t curre
 	if ((delay < 0) || !what || (strcmp(what, "connection") != 0))
 		return delay;
 
-	/* First attempt right away. The caller sleeps the returned delay after a failed attempt
-	 * without handling any window message: wait here instead, before the next attempt. */
 	if (current == 0)
 		return 0;
 
-	rdpContext* context = instance->context;
-	const wfContext* wfc = (const wfContext*)context;
-	HANDLE abort = freerdp_abort_event(context);
-	const DWORD count = abort ? 1 : 0;
-	const ULONGLONG end = GetTickCount64() + (ULONGLONG)delay;
-	for (;;)
+	HANDLE abort = freerdp_abort_event(instance->context);
+	if (!abort)
 	{
-		MSG msg = WINPR_C_ARRAY_INIT;
-		if (PeekMessage(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE) ||
-		    (wfc->hwnd && PeekMessage(&msg, wfc->hwnd, WM_CLOSE, WM_CLOSE, PM_REMOVE)))
-		{
-			WLog_INFO(TAG, "Window closed, automatic reconnection cancelled");
-			(void)freerdp_abort_connect_context(context);
-			return -1;
-		}
-
-		const ULONGLONG now = GetTickCount64();
-		if (now >= end)
-			break;
-
-		const DWORD status = MsgWaitForMultipleObjects(count, &abort, FALSE, (DWORD)(end - now),
-		                                               QS_SENDMESSAGE | QS_POSTMESSAGE);
-		if (((count == 1) && (status == WAIT_OBJECT_0)) || (status == WAIT_FAILED))
-			return -1;
-
-		/* Answers the messages sent to the window; posted ones wait for the session. */
-		(void)PeekMessage(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+		Sleep((DWORD)delay);
+		return 0;
 	}
 
-	return 0;
+	return (WaitForSingleObject(abort, (DWORD)delay) == WAIT_TIMEOUT) ? 0 : -1;
 }
 
 static BOOL wfreerdp_client_global_init(void)
