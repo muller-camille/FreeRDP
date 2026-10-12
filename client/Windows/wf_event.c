@@ -123,6 +123,10 @@ LRESULT CALLBACK wf_ll_kbd_proc(int nCode, WPARAM wParam, LPARAM lParam)
 				if (!wfc || !p)
 					return 1;
 
+				/* Reconnecting (see wf_auto_reconnect): no session to send the key to. */
+				if (wfc->reconnecting)
+					return CallNextHookEx(nullptr, nCode, wParam, lParam);
+
 				input = wfc->common.context.input;
 				{
 					/* Keys injected without a scan code (auto-type, on-screen keyboards)
@@ -891,7 +895,9 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 
 			g_focus_hWnd = hWnd;
 			freerdp_set_focus(wfc->common.context.instance);
-			wf_event_focus_in(wfc);
+			/* Reconnecting: sent once the session is back (focus required, see wf_client_thread). */
+			if (!wfc->reconnecting)
+				wf_event_focus_in(wfc);
 			break;
 
 		case WM_KILLFOCUS:
