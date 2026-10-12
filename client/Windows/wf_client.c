@@ -507,7 +507,9 @@ static BOOL wf_post_connect(freerdp* instance)
 		return FALSE;
 
 #ifdef WITH_PROGRESS_BAR
-	if (wfc->taskBarList)
+	/* Not for an embedded window (no taskbar button): shown minimized, it would be restored at
+	 * its size of now on the first frame, whatever size its parent gave it in the meantime. */
+	if (wfc->taskBarList && !freerdp_settings_get_bool(settings, FreeRDP_EmbeddedWindow))
 	{
 		ShowWindow(wfc->hwnd, SW_SHOWMINIMIZED);
 		wfc->taskBarList->lpVtbl->SetProgressState(wfc->taskBarList, wfc->hwnd, TBPF_INDETERMINATE);
