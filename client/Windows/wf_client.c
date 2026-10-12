@@ -214,7 +214,13 @@ static BOOL wf_desktop_resize(rdpContext* context)
 
 	if (wfc->fullscreen != TRUE)
 	{
-		if (wfc->hwnd && !freerdp_settings_get_bool(settings, FreeRDP_SmartSizing))
+		/* With dynamic resolution, an embedded window keeps the size its parent gives it: the
+		 * remote desktop follows the window, not the other way around. */
+		const BOOL follows = wfc->hWndParent &&
+		                     freerdp_settings_get_bool(settings, FreeRDP_DynamicResolutionUpdate);
+		if (wfc->hwnd && follows)
+			InvalidateRect(wfc->hwnd, nullptr, TRUE);
+		else if (wfc->hwnd && !freerdp_settings_get_bool(settings, FreeRDP_SmartSizing))
 			SetWindowPos(wfc->hwnd, HWND_TOP, -1, -1,
 			             freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth) + wfc->diff.x,
 			             freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight) + wfc->diff.y,
