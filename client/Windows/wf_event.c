@@ -41,6 +41,7 @@ static HWND g_main_hWnd = nullptr;
 static HWND g_parent_hWnd = nullptr;
 
 #define RESIZE_MIN_DELAY 200 /* minimum delay in ms between two resizes */
+#define WF_TIMER_DYNAMIC_RESOLUTION 0x7246 /* embedded window resized by its parent */
 
 static BOOL wf_scale_blt(wfContext* wfc, HDC hdc, int x, int y, int w, int h, HDC hdcSrc, int x1,
                          int y1, DWORD rop);
@@ -467,6 +468,12 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 					wfc->client_height = HIWORD(lParam);
 					wfc->client_x = windowRect.left;
 					wfc->client_y = windowRect.top;
+
+					/* An embedded window (/parent-window) is resized by its parent and never gets
+					 * WM_EXITSIZEMOVE: send the new size once the parent stops resizing it. */
+					if (wfc->hWndParent &&
+					    freerdp_settings_get_bool(settings, FreeRDP_DynamicResolutionUpdate))
+						SetTimer(hWnd, WF_TIMER_DYNAMIC_RESOLUTION, RESIZE_MIN_DELAY, nullptr);
 				}
 				else
 				{
@@ -504,6 +511,25 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 			case WM_EXITSIZEMOVE:
 				wf_size_scrollbars(wfc, wfc->client_width, wfc->client_height);
 				wf_send_resize(wfc);
+				break;
+
+			case WM_TIMER:
+				if (wParam != WF_TIMER_DYNAMIC_RESOLUTION)
+				{
+					processed = FALSE;
+					break;
+				}
+
+				/* Still within the delay between two resizes: try again later. */
+				if (GetTickCount64() - wfc->lastSentDate <= RESIZE_MIN_DELAY)
+					break;
+
+				KillTimer(hWnd, WF_TIMER_DYNAMIC_RESOLUTION);
+				if (((wfc->client_width & ~1) !=
+				     (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth)) ||
+				    (wfc->client_height !=
+				     (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight)))
+					wf_send_resize(wfc);
 				break;
 
 			case WM_ERASEBKGND:
