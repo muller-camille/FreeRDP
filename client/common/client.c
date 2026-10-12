@@ -1513,7 +1513,11 @@ static BOOL client_auto_reconnect_do(freerdp* instance, BOOL retry, UINT32 numRe
 		numRetries++;
 
 		if (freerdp_reconnect(instance))
+		{
+			/* Tells the user (or an application embedding the client) that the session is back. */
+			WLog_INFO(TAG, "Reconnected");
 			return TRUE;
+		}
 
 		/* The server can also reject the credentials on a reconnect attempt, e.g. after a
 		 * password change. Retrying them only locks the account sooner. */
