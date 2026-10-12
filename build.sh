@@ -11,7 +11,7 @@ freerdp_repository=https://github.com/muller-camille/FreeRDP
 freerdp_version=3.32.1
 freerdp_commit=ecd01ed53dc324f41773cd31419beff5e58c5532
 # Release number for this FreeRDP version: bump it for any change to this script or to the pinned commit.
-release=1
+release=2
 openssl_version=3.5.9
 openssl_sha256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
 openssl_url=https://github.com/openssl/openssl/releases/download/openssl-$openssl_version/openssl-$openssl_version.tar.gz
@@ -77,6 +77,8 @@ test "$(git -C "$src" rev-parse HEAD)" = "$freerdp_commit"
 
 build="$work/freerdp-build"
 rm -rf "$build"
+# WITH_DEBUG_CLIPRDR: clipboard messages of the Windows client (window messages and errors, never the clipboard
+# contents), at DEBUG level: only shown with /log-filters:com.freerdp.client.windows:DEBUG.
 cmake -S "$src" -B "$build" -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$tools/mingw64.cmake" \
   -DCMAKE_BUILD_TYPE=Release \
@@ -91,7 +93,8 @@ cmake -S "$src" -B "$build" -G Ninja \
   -DWITH_SOXR=OFF -DWITH_OPENH264=OFF -DWITH_WEBVIEW=OFF \
   -DWITH_JSON_DISABLED=ON -DWITH_AAD=OFF -DWITH_SMARTCARD_EMULATE=OFF -DWITH_PKCS11=OFF \
   -DCHANNEL_URBDRC=OFF -DWITH_FREERDP_DEPRECATED_COMMANDLINE=OFF \
-  -DWITH_INTERNAL_RC4=ON -DWITH_INTERNAL_MD4=ON -DWITH_INTERNAL_MD5=ON -DWITH_VERBOSE_WINPR_ASSERT=OFF
+  -DWITH_INTERNAL_RC4=ON -DWITH_INTERNAL_MD4=ON -DWITH_INTERNAL_MD5=ON -DWITH_VERBOSE_WINPR_ASSERT=OFF \
+  -DWITH_DEBUG_CLIPRDR=ON
 cmake --build "$build" --target wfreerdp -j "$jobs"
 
 exe=$(find "$build" -name wfreerdp.exe -type f | head -n 1)
