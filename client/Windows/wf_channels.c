@@ -24,12 +24,30 @@
 
 #include "wf_rail.h"
 #include "wf_cliprdr.h"
+#include "wf_event.h"
 
 #include <freerdp/gdi/gfx.h>
 #include <freerdp/gdi/video.h>
 
 #include <freerdp/log.h>
 #define TAG CLIENT_TAG("windows")
+
+/* The server takes monitor layouts once it has sent its capabilities: from then on, the window size
+ * is sent if it already differs from the remote desktop (window resized while connecting). */
+static UINT wf_disp_caps(DispClientContext* disp, WINPR_ATTR_UNUSED UINT32 maxNumMonitors,
+                         WINPR_ATTR_UNUSED UINT32 maxMonitorAreaFactorA,
+                         WINPR_ATTR_UNUSED UINT32 maxMonitorAreaFactorB)
+{
+	WINPR_ASSERT(disp);
+	wfContext* wfc = (wfContext*)disp->custom;
+	WINPR_ASSERT(wfc);
+
+	wfc->disp = disp;
+	if (wfc->hwnd &&
+	    freerdp_settings_get_bool(wfc->common.context.settings, FreeRDP_DynamicResolutionUpdate))
+		PostMessage(wfc->hwnd, WM_TIMER, WF_TIMER_DYNAMIC_RESOLUTION, 0);
+	return CHANNEL_RC_OK;
+}
 
 void wf_OnChannelConnectedEventHandler(void* context, const ChannelConnectedEventArgs* e)
 {
@@ -52,7 +70,10 @@ void wf_OnChannelConnectedEventHandler(void* context, const ChannelConnectedEven
 	}
 	else if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0)
 	{
-		wfc->disp = (DispClientContext*)e->pInterface;
+		DispClientContext* disp = (DispClientContext*)e->pInterface;
+		WINPR_ASSERT(disp);
+		disp->custom = wfc;
+		disp->DisplayControlCaps = wf_disp_caps;
 	}
 	else
 		freerdp_client_OnChannelConnectedEventHandler(context, e);

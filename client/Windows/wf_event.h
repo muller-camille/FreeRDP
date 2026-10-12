@@ -30,6 +30,9 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 
 void wf_event_focus_in(wfContext* wfc);
 
+/* Timer (or posted WM_TIMER) that sends the window size to the server with dynamic resolution. */
+#define WF_TIMER_DYNAMIC_RESOLUTION 0x7246
+
 BOOL wf_keyboard_set_indicators(rdpContext* context, UINT16 led_flags);
 
 #define KBD_TAG CLIENT_TAG("windows")
