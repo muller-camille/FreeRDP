@@ -9,9 +9,9 @@ set -euo pipefail
 
 freerdp_repository=https://github.com/muller-camille/FreeRDP
 freerdp_version=3.32.1
-freerdp_commit=eaaac38476ca82dfaa3266b3ebf507b7acb0ba7e
+freerdp_commit=5d580f5e87981131e81833758256ca1dc1da6752
 # Release number for this FreeRDP version: bump it for any change to this script or to the pinned commit.
-release=5
+release=6
 openssl_version=3.5.9
 openssl_sha256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
 openssl_url=https://github.com/openssl/openssl/releases/download/openssl-$openssl_version/openssl-$openssl_version.tar.gz
