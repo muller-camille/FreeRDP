@@ -354,6 +354,9 @@ static void wf_send_resize(wfContext* wfc)
 				targetWidth = windowRect.right - windowRect.left;
 				targetHeight = windowRect.bottom - windowRect.top;
 			}
+			/* [MS-RDPEDISP] 2.2.2.2.1: width and height from 200 to 8192 pixels, width even. */
+			targetWidth = MAX(200, MIN(8192, targetWidth)) & ~1;
+			targetHeight = MAX(200, MIN(8192, targetHeight));
 			if (freerdp_settings_get_uint32(settings, FreeRDP_SmartSizingWidth) != targetWidth ||
 			    freerdp_settings_get_uint32(settings, FreeRDP_SmartSizingHeight) != targetHeight)
 			{
