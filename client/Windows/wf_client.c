@@ -1420,8 +1420,15 @@ static SSIZE_T wf_retry_dialog(freerdp* instance, const char* what, size_t curre
 	WINPR_ASSERT(instance);
 
 	const SSIZE_T delay = client_common_retry_dialog(instance, what, current, userarg);
-	if ((delay < 0) || (current == 0))
+	/* Only the automatic reconnection: other callers (gateway) sleep the delay themselves and
+	 * take 0 as "no retry". */
+	if ((delay < 0) || !what || (strcmp(what, "connection") != 0))
 		return delay;
+
+	/* First attempt right away. The caller sleeps the returned delay after a failed attempt
+	 * without handling any window message: wait here instead, before the next attempt. */
+	if (current == 0)
+		return 0;
 
 	rdpContext* context = instance->context;
 	const wfContext* wfc = (const wfContext*)context;
