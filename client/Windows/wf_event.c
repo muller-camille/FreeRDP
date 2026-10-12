@@ -36,6 +36,9 @@
 
 #include <windowsx.h>
 
+#include <freerdp/log.h>
+#define TAG CLIENT_TAG("windows")
+
 static HWND g_focus_hWnd = nullptr;
 static HWND g_main_hWnd = nullptr;
 static HWND g_parent_hWnd = nullptr;
@@ -344,6 +347,10 @@ static void wf_send_resize(wfContext* wfc)
 	rdpSettings* settings = wfc->common.context.settings;
 
 	if (freerdp_settings_get_bool(settings, FreeRDP_DynamicResolutionUpdate) &&
+	    wfc->disp == nullptr)
+		WLog_DBG(TAG, "dynamic resolution: display control channel not ready, size not sent");
+
+	if (freerdp_settings_get_bool(settings, FreeRDP_DynamicResolutionUpdate) &&
 	    wfc->disp != nullptr)
 	{
 		if (GetTickCount64() - wfc->lastSentDate > RESIZE_MIN_DELAY)
@@ -375,10 +382,12 @@ static void wf_send_resize(wfContext* wfc)
 				layout.PhysicalWidth = targetWidth;
 				layout.PhysicalHeight = targetHeight;
 
+				WLog_DBG(TAG, "dynamic resolution: monitor layout %dx%d", targetWidth,
+				         targetHeight);
 				if (IFCALLRESULT(CHANNEL_RC_OK, wfc->disp->SendMonitorLayout, wfc->disp, 1,
 				                 &layout) != CHANNEL_RC_OK)
 				{
-					WLog_ERR("", "SendMonitorLayout failed.");
+					WLog_ERR(TAG, "SendMonitorLayout failed.");
 				}
 				else
 				{
@@ -533,6 +542,10 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 				}
 
 				KillTimer(hWnd, WF_TIMER_DYNAMIC_RESOLUTION);
+				WLog_DBG(TAG, "dynamic resolution: window %dx%d, remote desktop %" PRIu32 "x%" PRIu32,
+				         wfc->client_width, wfc->client_height,
+				         freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth),
+				         freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight));
 				if ((wfc->client_width > 0) && (wfc->client_height > 0) &&
 				    (((wfc->client_width & ~1) !=
 				      (int)freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth)) ||

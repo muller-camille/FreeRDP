@@ -34,7 +34,7 @@
 
 /* The server takes monitor layouts once it has sent its capabilities: from then on, the window size
  * is sent if it already differs from the remote desktop (window resized while connecting). */
-static UINT wf_disp_caps(DispClientContext* disp, WINPR_ATTR_UNUSED UINT32 maxNumMonitors,
+static UINT wf_disp_caps(DispClientContext* disp, UINT32 maxNumMonitors,
                          WINPR_ATTR_UNUSED UINT32 maxMonitorAreaFactorA,
                          WINPR_ATTR_UNUSED UINT32 maxMonitorAreaFactorB)
 {
@@ -42,6 +42,7 @@ static UINT wf_disp_caps(DispClientContext* disp, WINPR_ATTR_UNUSED UINT32 maxNu
 	wfContext* wfc = (wfContext*)disp->custom;
 	WINPR_ASSERT(wfc);
 
+	WLog_DBG(TAG, "display control ready: %" PRIu32 " monitor(s) at most", maxNumMonitors);
 	wfc->disp = disp;
 	if (wfc->hwnd &&
 	    freerdp_settings_get_bool(wfc->common.context.settings, FreeRDP_DynamicResolutionUpdate))
