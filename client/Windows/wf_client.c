@@ -1192,6 +1192,12 @@ static BOOL wf_auto_reconnect(wfContext* wfc)
 	if (wfc->hwnd)
 		(void)InvalidateRect(wfc->hwnd, nullptr, FALSE);
 	(void)EnumThreadWindows(GetCurrentThreadId(), wf_invalidate_window, 0);
+
+	/* New connection, display updates allowed again by the server: suppressed again if the
+	 * window is still hidden or minimized. */
+	if (context->gdi)
+		context->gdi->suppressOutput = FALSE;
+	wf_update_suppress_output(wfc);
 	return TRUE;
 }
 

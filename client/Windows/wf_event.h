@@ -33,6 +33,12 @@ void wf_event_focus_in(wfContext* wfc);
 /* Timer (or posted WM_TIMER) that sends the window size to the server with dynamic resolution. */
 #define WF_TIMER_DYNAMIC_RESOLUTION 0x7246
 
+/* Posted WM_TIMER: display updates suppressed or allowed again once the window was hidden,
+ * minimized or shown (see wf_update_suppress_output). */
+#define WF_TIMER_SUPPRESS_OUTPUT 0x7247
+
+void wf_update_suppress_output(wfContext* wfc);
+
 BOOL wf_keyboard_set_indicators(rdpContext* context, UINT16 led_flags);
 
 #define KBD_TAG CLIENT_TAG("windows")
