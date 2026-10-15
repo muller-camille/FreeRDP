@@ -345,6 +345,40 @@ static void wf_sizing(wfContext* wfc, WPARAM wParam, LPARAM lParam)
 	}
 }
 
+/**
+ * Display updates suppressed while the session window is hidden or minimized, allowed again (the
+ * whole desktop is sent again) once it is shown, as mstsc does when minimized and the X11 client
+ * when its window is unmapped: no display traffic, and no encoding on the server, for a session
+ * nobody sees. The connection stays open. An application embedding the window (/parent-window)
+ * hides it to stop the display traffic of a session it does not show.
+ * Checked once the window state is settled: a window hidden and shown again at once (full screen
+ * toggle) sends nothing. Not before the first frame (the window is shown minimized until then, and
+ * restored by that frame), nor for RemoteApp in windows of their own on the local desktop (the
+ * session window is not the one shown); embedded, RemoteApp is drawn in the session window.
+ */
+void wf_update_suppress_output(wfContext* wfc)
+{
+	WINPR_ASSERT(wfc);
+
+	rdpGdi* gdi = wfc->common.context.gdi;
+	rdpSettings* settings = wfc->common.context.settings;
+	if (!wfc->hwnd || !gdi || !wfc->is_shown ||
+	    InterlockedCompareExchange(&wfc->reconnecting, FALSE, FALSE) ||
+	    (freerdp_settings_get_bool(settings, FreeRDP_RemoteApplicationMode) &&
+	     !freerdp_settings_get_bool(settings, FreeRDP_EmbeddedWindow)))
+		return;
+
+	const BOOL hidden =
+	    ((GetWindowLongPtr(wfc->hwnd, GWL_STYLE) & WS_VISIBLE) == 0) || IsIconic(wfc->hwnd);
+	if (gdi->suppressOutput == hidden)
+		return;
+
+	WLog_DBG(TAG, "display updates %s", hidden ? "suppressed (window hidden)"
+	                                           : "allowed (window shown)");
+	if (!gdi_send_suppress_output(gdi, hidden))
+		WLog_WARN(TAG, "failed to %s display updates", hidden ? "suppress" : "allow");
+}
+
 static void wf_send_resize(wfContext* wfc)
 {
 	RECT windowRect;
@@ -479,6 +513,12 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 				break;
 
 			case WM_SIZE:
+				/* Minimized, or restored while display updates are suppressed. */
+				if ((hWnd == wfc->hwnd) &&
+				    ((wParam == SIZE_MINIMIZED) ||
+				     (wfc->common.context.gdi && wfc->common.context.gdi->suppressOutput)))
+					(void)PostMessage(hWnd, WM_TIMER, WF_TIMER_SUPPRESS_OUTPUT, 0);
+
 				GetWindowRect(wfc->hwnd, &windowRect);
 
 				if (!wfc->fullscreen)
@@ -535,7 +575,20 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 				wf_send_resize(wfc);
 				break;
 
+			case WM_SHOWWINDOW:
+				/* Sent before the window is hidden or shown: checked once it is. */
+				if (hWnd == wfc->hwnd)
+					(void)PostMessage(hWnd, WM_TIMER, WF_TIMER_SUPPRESS_OUTPUT, 0);
+				processed = FALSE;
+				break;
+
 			case WM_TIMER:
+				if (wParam == WF_TIMER_SUPPRESS_OUTPUT)
+				{
+					wf_update_suppress_output(wfc);
+					break;
+				}
+
 				if (wParam != WF_TIMER_DYNAMIC_RESOLUTION)
 				{
 					processed = FALSE;
