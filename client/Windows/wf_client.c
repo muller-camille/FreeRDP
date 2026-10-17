@@ -63,6 +63,7 @@
 #include "wf_rail.h"
 #include "wf_channels.h"
 #include "wf_graphics.h"
+#include "wf_frames.h"
 
 #include "resource/resource.h"
 
@@ -88,7 +89,7 @@ static BOOL wf_has_console(void)
 	return tty && inherited;
 }
 
-static BOOL wf_end_paint(rdpContext* context)
+static BOOL wf_end_paint_window(rdpContext* context)
 {
 	RECT updateRect = WINPR_C_ARRAY_INIT;
 	REGION16 invalidRegion = WINPR_C_ARRAY_INIT;
@@ -165,6 +166,16 @@ static BOOL wf_end_paint(rdpContext* context)
 	return TRUE;
 }
 
+static BOOL wf_end_paint(rdpContext* context)
+{
+	WINPR_ASSERT(context);
+
+	const BOOL rc = wf_end_paint_window(context);
+	/* The region just drawn goes to the frame export too. */
+	wf_frames_end(((wfContext*)context)->frames, context->gdi, FALSE);
+	return rc;
+}
+
 static BOOL wf_begin_paint(rdpContext* context)
 {
 	HGDI_DC hdc;
@@ -179,10 +190,12 @@ static BOOL wf_begin_paint(rdpContext* context)
 
 	hdc->hwnd->invalid->null = TRUE;
 	hdc->hwnd->ninvalid = 0;
+	/* The frame export does not read the desktop until it is drawn. */
+	wf_frames_begin(((wfContext*)context)->frames);
 	return TRUE;
 }
 
-static BOOL wf_desktop_resize(rdpContext* context)
+static BOOL wf_desktop_resize_surface(rdpContext* context)
 {
 	BOOL same;
 	RECT rect;
@@ -237,6 +250,20 @@ static BOOL wf_desktop_resize(rdpContext* context)
 	}
 
 	return TRUE;
+}
+
+static BOOL wf_desktop_resize(rdpContext* context)
+{
+	if (!context)
+		return FALSE;
+
+	/* The frame export does not read the primary surface while it is reallocated, then sends the
+	 * whole desktop at its new size. */
+	wfContext* wfc = (wfContext*)context;
+	wf_frames_begin(wfc->frames);
+	const BOOL rc = wf_desktop_resize_surface(context);
+	wf_frames_end(wfc->frames, context->gdi, TRUE);
+	return rc;
 }
 
 static BOOL wf_pre_connect(freerdp* instance)
@@ -422,7 +449,7 @@ static WCHAR* wf_window_get_title(rdpSettings* settings)
 	return windowTitle;
 }
 
-static BOOL wf_post_connect(freerdp* instance)
+static BOOL wf_post_connect_session(freerdp* instance)
 {
 	rdpGdi* gdi;
 	DWORD dwStyle;
@@ -533,6 +560,33 @@ static BOOL wf_post_connect(freerdp* instance)
 	return TRUE;
 }
 
+static BOOL wf_post_connect(freerdp* instance)
+{
+	WINPR_ASSERT(instance);
+
+	wfContext* wfc = (wfContext*)instance->context;
+	WINPR_ASSERT(wfc);
+
+	if (wfc->framePipe)
+	{
+		wfc->frames = wf_frames_new(wfc->framePipe, wfc->frameInterval);
+
+		if (!wfc->frames)
+		{
+			WLog_WARN(TAG, "frame export not started");
+			(void)CloseHandle(wfc->framePipe);
+		}
+
+		wfc->framePipe = nullptr;
+	}
+
+	/* The whole desktop goes in the next message: new connection, new surface. */
+	wf_frames_begin(wfc->frames);
+	const BOOL rc = wf_post_connect_session(instance);
+	wf_frames_end(wfc->frames, instance->context->gdi, TRUE);
+	return rc;
+}
+
 static void wf_post_disconnect(freerdp* instance)
 {
 	wfContext* wfc;
@@ -541,6 +595,8 @@ static void wf_post_disconnect(freerdp* instance)
 		return;
 
 	wfc = (wfContext*)instance->context;
+	/* The GDI may be freed or replaced from now on. */
+	wf_frames_detach(wfc->frames);
 	free(wfc->window_title);
 }
 
@@ -1641,6 +1697,16 @@ static void wfreerdp_client_free(freerdp* instance, rdpContext* context)
 	WINPR_UNUSED(instance);
 	if (!context)
 		return;
+
+	wfContext* wfc = (wfContext*)context;
+	wf_frames_free(wfc->frames);
+	wfc->frames = nullptr;
+
+	if (wfc->framePipe)
+	{
+		(void)CloseHandle(wfc->framePipe);
+		wfc->framePipe = nullptr;
+	}
 
 #ifdef WITH_PROGRESS_BAR
 	CoUninitialize();
