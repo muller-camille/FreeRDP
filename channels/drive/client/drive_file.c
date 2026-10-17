@@ -385,6 +385,9 @@ BOOL drive_file_free(DRIVE_FILE* file)
 	if (!file)
 		return FALSE;
 
+	/* Before a delete on close: the watched directory must not be held open. */
+	drive_file_notify_end(file, FALSE);
+
 	if (file->file_handle != INVALID_HANDLE_VALUE)
 	{
 		(void)CloseHandle(file->file_handle);
@@ -417,6 +420,210 @@ fail:
 	free(file->fullpath);
 	free(file);
 	return rc;
+}
+
+#if defined(_WIN32)
+/* Changes given back at once. More changes between two requests and the system reports an overflow
+ * (STATUS_NOTIFY_ENUM_DIR, nothing in the buffer): the server lists the directory again. */
+#define DRIVE_NOTIFY_BUFFER_SIZE 8192
+
+struct S_DRIVE_NOTIFY
+{
+	HANDLE directory;
+	OVERLAPPED overlapped;
+	HANDLE wait;
+	PVOID volatile irp; /* pending request, taken once by whoever completes it */
+	DWORD buffer[DRIVE_NOTIFY_BUFFER_SIZE /
+	             sizeof(DWORD)]; /* DWORD aligned for ReadDirectoryChangesW */
+};
+
+static VOID CALLBACK drive_file_notify_done(PVOID context, WINPR_ATTR_UNUSED BOOLEAN timedOut)
+{
+	DRIVE_NOTIFY* notify = context;
+	DWORD length = 0;
+
+	WINPR_ASSERT(notify);
+	(void)GetOverlappedResult(notify->directory, &notify->overlapped, &length, FALSE);
+	NTSTATUS status = (NTSTATUS)notify->overlapped.Internal;
+
+	/* Cancelled by drive_file_notify_end, which completes the request itself. */
+	if (status == STATUS_CANCELLED)
+		return;
+
+	IRP* irp = InterlockedExchangePointer(&notify->irp, nullptr);
+	if (!irp)
+		return;
+
+	if ((status == STATUS_SUCCESS) && (length == 0))
+		status = STATUS_NOTIFY_ENUM_DIR;
+
+	if (length > sizeof(notify->buffer))
+		length = 0;
+
+	if (!Stream_EnsureRemainingCapacity(irp->output, 4ull + length))
+	{
+		WLog_ERR(TAG, "Stream_EnsureRemainingCapacity failed!");
+		irp->Discard(irp);
+		return;
+	}
+
+	irp->IoStatus = status;
+	Stream_Write_UINT32(irp->output, length); /* Length */
+	Stream_Write(irp->output, notify->buffer, length);
+	const UINT error = irp->Complete(irp);
+	if (error != CHANNEL_RC_OK)
+		WLog_WARN(TAG, "change notification not sent: %" PRIu32, error);
+}
+
+/* Cancels the read of changes and waits until it and its wait are over: no callback runs after. */
+static void drive_file_notify_stop(DRIVE_NOTIFY* notify)
+{
+	WINPR_ASSERT(notify);
+
+	if (notify->directory != INVALID_HANDLE_VALUE)
+	{
+		DWORD length = 0;
+		(void)CancelIoEx(notify->directory, &notify->overlapped);
+		(void)GetOverlappedResult(notify->directory, &notify->overlapped, &length, TRUE);
+	}
+
+	if (notify->wait)
+	{
+		(void)UnregisterWaitEx(notify->wait, INVALID_HANDLE_VALUE);
+		notify->wait = nullptr;
+	}
+}
+
+static void drive_file_notify_free(DRIVE_NOTIFY* notify)
+{
+	if (!notify)
+		return;
+
+	drive_file_notify_stop(notify);
+	if (notify->directory != INVALID_HANDLE_VALUE)
+		(void)CloseHandle(notify->directory);
+
+	if (notify->overlapped.hEvent)
+		(void)CloseHandle(notify->overlapped.hEvent);
+
+	free(notify);
+}
+#endif
+
+BOOL drive_file_notify_change(DRIVE_FILE* file, IRP* irp, BOOL WatchTree, UINT32 CompletionFilter)
+{
+	WINPR_ASSERT(file);
+	WINPR_ASSERT(irp);
+
+#if defined(_WIN32)
+	if (!file->is_dir)
+	{
+		SetLastError(ERROR_DIRECTORY);
+		return FALSE;
+	}
+
+	DRIVE_NOTIFY* notify = file->notify;
+	if (!notify)
+	{
+		notify = calloc(1, sizeof(DRIVE_NOTIFY));
+		if (!notify)
+		{
+			SetLastError(ERROR_OUTOFMEMORY);
+			return FALSE;
+		}
+
+		/* A handle of its own, opened for overlapped reads of changes. */
+		notify->directory =
+		    CreateFileW(file->fullpath, FILE_LIST_DIRECTORY,
+		                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+		                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
+		notify->overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		if ((notify->directory == INVALID_HANDLE_VALUE) || !notify->overlapped.hEvent)
+		{
+			const DWORD error = GetLastError();
+			drive_file_notify_free(notify);
+			SetLastError(error);
+			return FALSE;
+		}
+
+		file->notify = notify;
+	}
+	else if (notify->irp)
+	{
+		/* One pending request at a time. */
+		SetLastError(ERROR_NOT_SUPPORTED);
+		return FALSE;
+	}
+
+	/* The wait of the previous request has run: release it. */
+	if (notify->wait)
+	{
+		(void)UnregisterWaitEx(notify->wait, INVALID_HANDLE_VALUE);
+		notify->wait = nullptr;
+	}
+
+	(void)InterlockedExchangePointer(&notify->irp, irp);
+	if (!ReadDirectoryChangesW(notify->directory, notify->buffer, sizeof(notify->buffer), WatchTree,
+	                           CompletionFilter, nullptr, &notify->overlapped, nullptr))
+	{
+		const DWORD error = GetLastError();
+		(void)InterlockedExchangePointer(&notify->irp, nullptr);
+		SetLastError(error);
+		return FALSE;
+	}
+
+	if (!RegisterWaitForSingleObject(&notify->wait, notify->overlapped.hEvent,
+	                                 drive_file_notify_done, notify, INFINITE, WT_EXECUTEONLYONCE))
+	{
+		const DWORD error = GetLastError();
+		DWORD length = 0;
+		notify->wait = nullptr;
+		(void)CancelIoEx(notify->directory, &notify->overlapped);
+		(void)GetOverlappedResult(notify->directory, &notify->overlapped, &length, TRUE);
+		(void)InterlockedExchangePointer(&notify->irp, nullptr);
+		SetLastError(error);
+		return FALSE;
+	}
+
+	return TRUE;
+#else
+	WINPR_UNUSED(WatchTree);
+	WINPR_UNUSED(CompletionFilter);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return FALSE;
+#endif
+}
+
+void drive_file_notify_end(DRIVE_FILE* file, BOOL complete)
+{
+	if (!file || !file->notify)
+		return;
+
+#if defined(_WIN32)
+	DRIVE_NOTIFY* notify = file->notify;
+	file->notify = nullptr;
+
+	/* Once the read of changes and its wait are over, a request still pending is ours alone. */
+	drive_file_notify_stop(notify);
+	IRP* irp = InterlockedExchangePointer(&notify->irp, nullptr);
+	drive_file_notify_free(notify);
+	if (!irp)
+		return;
+
+	if (!complete)
+	{
+		irp->Discard(irp);
+		return;
+	}
+
+	irp->IoStatus = STATUS_NOTIFY_CLEANUP;
+	Stream_Write_UINT32(irp->output, 0); /* Length */
+	const UINT error = irp->Complete(irp);
+	if (error != CHANNEL_RC_OK)
+		WLog_WARN(TAG, "end of change notification not sent: %" PRIu32, error);
+#else
+	WINPR_UNUSED(complete);
+#endif
 }
 
 BOOL drive_file_seek(DRIVE_FILE* file, UINT64 Offset)

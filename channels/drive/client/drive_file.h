@@ -31,8 +31,12 @@
 
 #include <freerdp/api.h>
 #include <freerdp/channels/log.h>
+#include <freerdp/channels/rdpdr.h>
 
 #define TAG CHANNELS_TAG("drive.client")
+
+/** Directory change notification of an open directory (IRP_MN_NOTIFY_CHANGE_DIRECTORY). */
+typedef struct S_DRIVE_NOTIFY DRIVE_NOTIFY;
 
 typedef struct
 {
@@ -49,6 +53,7 @@ typedef struct
 	UINT32 DesiredAccess;
 	UINT32 CreateDisposition;
 	UINT32 CreateOptions;
+	DRIVE_NOTIFY* notify;
 } DRIVE_FILE;
 
 FREERDP_LOCAL BOOL drive_file_free(DRIVE_FILE* file);
@@ -83,5 +88,24 @@ WINPR_ATTR_NODISCARD
 FREERDP_LOCAL BOOL drive_file_query_directory(DRIVE_FILE* file, UINT32 FsInformationClass,
                                               BYTE InitialQuery, const WCHAR* path,
                                               UINT32 PathWCharLength, wStream* output);
+
+/**
+ * Keeps irp pending and completes it with the next changes in the directory, as
+ * FILE_NOTIFY_INFORMATION records (DR_DRIVE_NOTIFY_CHANGE_DIRECTORY_RSP). Changes made while no
+ * request is pending are kept for the next one.
+ *
+ * @return TRUE if irp is now owned by the file, FALSE with GetLastError() set otherwise (irp
+ * untouched; ERROR_NOT_SUPPORTED where change notifications are not available)
+ */
+WINPR_ATTR_NODISCARD
+FREERDP_LOCAL BOOL drive_file_notify_change(DRIVE_FILE* file, IRP* irp, BOOL WatchTree,
+                                            UINT32 CompletionFilter);
+
+/**
+ * Stops the change notification of the file. A pending request is completed with
+ * STATUS_NOTIFY_CLEANUP (handle closed by the server) if complete is TRUE, discarded otherwise
+ * (channel closing).
+ */
+FREERDP_LOCAL void drive_file_notify_end(DRIVE_FILE* file, BOOL complete);
 
 #endif /* FREERDP_CHANNEL_DRIVE_FILE_H */
