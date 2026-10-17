@@ -128,6 +128,10 @@ static NTSTATUS drive_map_windows_err(DWORD fs_errno)
 			rc = STATUS_DIRECTORY_NOT_EMPTY;
 			break;
 
+		case ERROR_NOT_SUPPORTED:
+			rc = STATUS_NOT_SUPPORTED;
+			break;
+
 		default:
 			rc = STATUS_UNSUCCESSFUL;
 			WLog_ERR(TAG, "Error code not found: %" PRIu32 "", fs_errno);
@@ -260,6 +264,9 @@ static UINT drive_process_irp_close(DRIVE_DEVICE* drive, IRP* irp)
 		irp->IoStatus = STATUS_UNSUCCESSFUL;
 	else
 	{
+		/* A pending change notification ends before the close itself. */
+		drive_file_notify_end(file, TRUE);
+
 		/* Free the file here, so that a failing delete on close is reported */
 		DRIVE_FILE* taken = ListDictionary_Take(drive->files, key);
 		if (drive_file_free(taken))
@@ -685,7 +692,36 @@ static UINT drive_process_irp_query_directory(DRIVE_DEVICE* drive, IRP* irp)
 /**
  * Function description
  *
- * @return 0 on success, otherwise a Win32 error code
+ * @return ERROR_IO_PENDING if the request is kept until the next change in the directory, 0 when it
+ * is answered now, otherwise a Win32 error code
+ */
+static UINT drive_process_irp_notify_change_directory(DRIVE_DEVICE* drive, IRP* irp)
+{
+	WINPR_ASSERT(drive);
+	WINPR_ASSERT(irp);
+
+	if (!Stream_CheckAndLogRequiredLength(TAG, irp->input, 5))
+		return ERROR_INVALID_DATA;
+
+	const BYTE WatchTree = Stream_Get_UINT8(irp->input);
+	const UINT32 CompletionFilter = Stream_Get_UINT32(irp->input);
+	DRIVE_FILE* file = drive_get_file_by_id(drive, irp->FileId);
+
+	if (!file)
+		irp->IoStatus = STATUS_UNSUCCESSFUL;
+	else if (drive_file_notify_change(file, irp, WatchTree != 0, CompletionFilter))
+		return ERROR_IO_PENDING;
+	else
+		irp->IoStatus = drive_map_windows_err(GetLastError());
+
+	Stream_Write_UINT32(irp->output, 0); /* Length */
+	return CHANNEL_RC_OK;
+}
+
+/**
+ * Function description
+ *
+ * @return 0 on success, ERROR_IO_PENDING for a pending request, otherwise a Win32 error code
  */
 static UINT drive_process_irp_directory_control(DRIVE_DEVICE* drive, IRP* irp)
 {
@@ -697,10 +733,8 @@ static UINT drive_process_irp_directory_control(DRIVE_DEVICE* drive, IRP* irp)
 		case IRP_MN_QUERY_DIRECTORY:
 			return drive_process_irp_query_directory(drive, irp);
 
-		case IRP_MN_NOTIFY_CHANGE_DIRECTORY: /* TODO */
-			irp->IoStatus = STATUS_NOT_SUPPORTED;
-			Stream_Write_UINT32(irp->output, 0); /* Length */
-			break;
+		case IRP_MN_NOTIFY_CHANGE_DIRECTORY:
+			return drive_process_irp_notify_change_directory(drive, irp);
 
 		default:
 			irp->IoStatus = STATUS_NOT_SUPPORTED;
@@ -799,6 +833,10 @@ static UINT drive_process_irp(DRIVE_DEVICE* drive, IRP* irp)
 			irp->IoStatus = STATUS_NOT_SUPPORTED;
 			break;
 	}
+
+	/* Completed later, by the file it waits on. */
+	if (error == ERROR_IO_PENDING)
+		return CHANNEL_RC_OK;
 
 	return drive_evaluate(error, irp);
 }
