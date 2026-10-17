@@ -151,6 +151,11 @@ extern "C"
 		HANDLE framePipe;
 		UINT32 frameInterval;
 		struct wf_frames* frames;
+
+		/* Drawing callbacks wrapped for the frame export: their screen to screen copies are
+		 * passed on (see wf_frames_copy). */
+		pScrBlt scrBlt;
+		pcRdpgfxSurfaceToSurface surfaceToSurface;
 	};
 
 	/**

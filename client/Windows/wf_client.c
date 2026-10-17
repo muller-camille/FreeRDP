@@ -560,6 +560,50 @@ static BOOL wf_post_connect_session(freerdp* instance)
 	return TRUE;
 }
 
+/* Screen to screen copy (scrolling, moved window), within the clipping rectangle: passed on to
+ * the frame export. */
+static BOOL wf_scrblt(rdpContext* context, const SCRBLT_ORDER* scrblt)
+{
+	wfContext* wfc = (wfContext*)context;
+	WINPR_ASSERT(wfc);
+	WINPR_ASSERT(wfc->scrBlt);
+
+	if (!wfc->scrBlt(context, scrblt))
+		return FALSE;
+
+	rdpGdi* gdi = context->gdi;
+
+	if (!wfc->frames || !scrblt || !gdi || !gdi->drawing || (gdi->drawing != gdi->primary) ||
+	    (scrblt->bRop != 0xCC))
+		return TRUE;
+
+	INT32 x = scrblt->nLeftRect;
+	INT32 y = scrblt->nTopRect;
+	INT32 width = scrblt->nWidth;
+	INT32 height = scrblt->nHeight;
+	INT32 sx = scrblt->nXSrc;
+	INT32 sy = scrblt->nYSrc;
+	const HGDI_DC hdc = gdi->drawing->hdc;
+
+	if (hdc && hdc->clip && !hdc->clip->null)
+	{
+		const HGDI_RGN clip = hdc->clip;
+		const INT32 left = MAX(x, clip->x);
+		const INT32 top = MAX(y, clip->y);
+		const INT32 right = MIN(x + width, clip->x + clip->w);
+		const INT32 bottom = MIN(y + height, clip->y + clip->h);
+		sx += left - x;
+		sy += top - y;
+		x = left;
+		y = top;
+		width = right - left;
+		height = bottom - top;
+	}
+
+	wf_frames_copy(wfc->frames, sx, sy, width, height, x, y);
+	return TRUE;
+}
+
 static BOOL wf_post_connect(freerdp* instance)
 {
 	WINPR_ASSERT(instance);
@@ -584,6 +628,15 @@ static BOOL wf_post_connect(freerdp* instance)
 	wf_frames_begin(wfc->frames);
 	const BOOL rc = wf_post_connect_session(instance);
 	wf_frames_end(wfc->frames, instance->context->gdi, TRUE);
+
+	rdpPrimaryUpdate* primary = instance->context->update->primary;
+
+	if (rc && wfc->frames && primary && primary->ScrBlt && (primary->ScrBlt != wf_scrblt))
+	{
+		wfc->scrBlt = primary->ScrBlt;
+		primary->ScrBlt = wf_scrblt;
+	}
+
 	return rc;
 }
 
