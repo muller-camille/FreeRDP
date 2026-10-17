@@ -1,6 +1,6 @@
 # Windows client builds
 
-This branch only holds the build of the FreeRDP Windows client (`wfreerdp.exe`) from the `patches-3.32.1` branch of
+This branch only holds the build of the FreeRDP Windows client (`wfreerdp.exe`) from the `patches-3.32.2` branch of
 this fork, and the workflow that publishes it as a release:
 
 - `build.sh`: FreeRDP at a pinned commit and OpenSSL at a pinned version (archive checked by its SHA-256 sum),
