@@ -145,6 +145,12 @@ extern "C"
 
 		/* Automatic reconnection in progress (see wf_auto_reconnect): no session for input. */
 		volatile LONG reconnecting;
+
+		/* /frame-pipe: pipe handle inherited from the parent process and interval (ms), until the
+		 * export starts; then the export of the changed regions (see wf_frames.h). */
+		HANDLE framePipe;
+		UINT32 frameInterval;
+		struct wf_frames* frames;
 	};
 
 	/**

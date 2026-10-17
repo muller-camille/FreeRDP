@@ -25,6 +25,11 @@
 
 #include <winpr/crt.h>
 
+#include <errno.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include <freerdp/freerdp.h>
 #include <freerdp/constants.h>
 
@@ -39,6 +44,82 @@
 #include <wf_defaults.h>
 
 #include <shellapi.h>
+
+/* Messages of the frame export: at most one every this many milliseconds by default. */
+#define WF_FRAME_INTERVAL_DEFAULT 100
+
+static COMMAND_LINE_ARGUMENT_A wf_args[] = {
+	{ "frame-pipe", COMMAND_LINE_VALUE_REQUIRED, "<handle>[,interval:<ms>]", nullptr, nullptr, -1,
+	  nullptr,
+	  "Write the regions of the remote desktop that change to this pipe, a handle inherited from "
+	  "the parent process: the desktop as decoded, whatever the window shows. At most one message "
+	  "every interval milliseconds (default 100, from 10 to 60000)." },
+	{ nullptr, 0, nullptr, nullptr, nullptr, -1, nullptr, nullptr }
+};
+
+/* /frame-pipe:<handle>[,interval:<ms>]: the handle must be a pipe of this process. */
+static int wf_parse_frame_pipe(wfContext* wfc, const char* value)
+{
+	char* end = nullptr;
+
+	if (!value || (*value == '\0'))
+		return COMMAND_LINE_ERROR;
+
+	/* Decimal (as .NET writes it), or hexadecimal with 0x. */
+	const int base = ((value[0] == '0') && ((value[1] == 'x') || (value[1] == 'X'))) ? 16 : 10;
+	errno = 0;
+	const unsigned long long handle = strtoull(value, &end, base);
+
+	if ((errno != 0) || (end == value) || (handle == 0) || (handle > UINTPTR_MAX))
+		return COMMAND_LINE_ERROR;
+
+	UINT32 interval = WF_FRAME_INTERVAL_DEFAULT;
+
+	if (*end == ',')
+	{
+		const char* option = end + 1;
+		const char prefix[] = "interval:";
+
+		if (strncmp(option, prefix, sizeof(prefix) - 1) != 0)
+			return COMMAND_LINE_ERROR;
+
+		const char* number = option + sizeof(prefix) - 1;
+		errno = 0;
+		const unsigned long ms = strtoul(number, &end, 10);
+
+		if ((errno != 0) || (end == number) || (*end != '\0') || (ms < 10) || (ms > 60000))
+			return COMMAND_LINE_ERROR;
+
+		interval = (UINT32)ms;
+	}
+	else if (*end != '\0')
+		return COMMAND_LINE_ERROR;
+
+	const HANDLE pipe = (HANDLE)(uintptr_t)handle;
+
+	if (GetFileType(pipe) != FILE_TYPE_PIPE)
+		return COMMAND_LINE_ERROR;
+
+	if (wfc->framePipe)
+		(void)CloseHandle(wfc->framePipe);
+
+	wfc->framePipe = pipe;
+	wfc->frameInterval = interval;
+	return 0;
+}
+
+static int wf_handle_option(const COMMAND_LINE_ARGUMENT_A* arg, void* custom)
+{
+	wfContext* wfc = (wfContext*)custom;
+
+	if (!arg || !arg->Name || !wfc)
+		return COMMAND_LINE_ERROR;
+
+	if (strcmp(arg->Name, "frame-pipe") == 0)
+		return wf_parse_frame_pipe(wfc, arg->Value);
+
+	return 0;
+}
 
 INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
@@ -109,10 +190,12 @@ INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	if (!settings || !wfc)
 		goto out;
 
-	status = freerdp_client_settings_parse_command_line(settings, argc, argv, FALSE);
+	status = freerdp_client_settings_parse_command_line_ex(
+	    settings, argc, argv, FALSE, wf_args, ARRAYSIZE(wf_args) - 1, wf_handle_option, wfc);
 	if (status)
 	{
-		ret = freerdp_client_settings_command_line_status_print(settings, status, argc, argv);
+		ret = freerdp_client_settings_command_line_status_print_ex(settings, status, argc, argv,
+		                                                           wf_args);
 		goto out;
 	}
 
