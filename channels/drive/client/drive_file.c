@@ -906,15 +906,6 @@ static BOOL drive_file_set_basic_information(DRIVE_FILE* file, UINT32 Length, wS
 	if (!PathFileExistsW(file->fullpath))
 		return FALSE;
 
-	if (file->file_handle == INVALID_HANDLE_VALUE)
-	{
-		char fullpath[MAX_PATH] = WINPR_C_ARRAY_INIT;
-		(void)ConvertWCharToUtf8(file->fullpath, fullpath, sizeof(fullpath) - 1);
-
-		WLog_ERR(TAG, "Unable to set file time %s (%" PRIu32 ")", fullpath, GetLastError());
-		return FALSE;
-	}
-
 	FILETIME ftCreationTime = WINPR_C_ARRAY_INIT;
 	FILETIME ftLastAccessTime = WINPR_C_ARRAY_INIT;
 	FILETIME ftLastWriteTime = WINPR_C_ARRAY_INIT;
@@ -951,7 +942,8 @@ static BOOL drive_file_set_basic_information(DRIVE_FILE* file, UINT32 Length, wS
 
 	DEBUG_WSTR("SetFileTime %s", file->fullpath);
 
-	if (!SetFileAttributesW(file->fullpath, FileAttributes))
+	/* 0: attributes left unchanged (MS-FSCC 2.4.7) */
+	if ((FileAttributes != 0) && !SetFileAttributesW(file->fullpath, FileAttributes))
 	{
 		char fullpath[MAX_PATH] = WINPR_C_ARRAY_INIT;
 		(void)ConvertWCharToUtf8(file->fullpath, fullpath, sizeof(fullpath));
@@ -959,11 +951,37 @@ static BOOL drive_file_set_basic_information(DRIVE_FILE* file, UINT32 Length, wS
 		return FALSE;
 	}
 
-	if (!SetFileTime(file->file_handle, pftCreationTime, pftLastAccessTime, pftLastWriteTime))
+	if (!pftCreationTime && !pftLastAccessTime && !pftLastWriteTime)
+		return TRUE;
+
+	/* A directory is open without a handle: one of its own, just for the times. */
+	HANDLE handle = file->file_handle;
+	if (handle == INVALID_HANDLE_VALUE)
+		handle = CreateFileW(file->fullpath, FILE_WRITE_ATTRIBUTES,
+		                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+		                     OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+
+	if (handle == INVALID_HANDLE_VALUE)
+	{
+		const DWORD error = GetLastError();
+		char fullpath[MAX_PATH] = WINPR_C_ARRAY_INIT;
+		(void)ConvertWCharToUtf8(file->fullpath, fullpath, sizeof(fullpath) - 1);
+		WLog_ERR(TAG, "Unable to set file time %s (%" PRIu32 ")", fullpath, error);
+		SetLastError(error);
+		return FALSE;
+	}
+
+	const BOOL rc = SetFileTime(handle, pftCreationTime, pftLastAccessTime, pftLastWriteTime);
+	const DWORD error = GetLastError();
+	if (handle != file->file_handle)
+		(void)CloseHandle(handle);
+
+	if (!rc)
 	{
 		char fullpath[MAX_PATH] = WINPR_C_ARRAY_INIT;
 		(void)ConvertWCharToUtf8(file->fullpath, fullpath, sizeof(fullpath));
 		WLog_ERR(TAG, "Unable to set file time for %s", fullpath);
+		SetLastError(error);
 		return FALSE;
 	}
 	return TRUE;
