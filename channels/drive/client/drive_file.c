@@ -437,6 +437,7 @@ struct S_DRIVE_NOTIFY
 	OVERLAPPED overlapped;
 	HANDLE wait;
 	PVOID volatile irp; /* pending request, taken once by whoever completes it */
+	UINT32 id;          /* FileId, for the log */
 	DWORD buffer[DRIVE_NOTIFY_BUFFER_SIZE /
 	             sizeof(DWORD)]; /* DWORD aligned for ReadDirectoryChangesW */
 };
@@ -463,6 +464,9 @@ static VOID CALLBACK drive_file_notify_done(PVOID context, WINPR_ATTR_UNUSED BOO
 
 	if (length > sizeof(notify->buffer))
 		length = 0;
+
+	WLog_DBG(TAG, "FileId=0x%08" PRIx32 ": changes, status 0x%08" PRIx32 ", %" PRIu32 " bytes",
+	         notify->id, (UINT32)status, length);
 
 	if (!Stream_EnsureRemainingCapacity(irp->output, 4ull + length))
 	{
@@ -550,6 +554,7 @@ BOOL drive_file_notify_change(DRIVE_FILE* file, IRP* irp, BOOL WatchTree, UINT32
 			return FALSE;
 		}
 
+		notify->id = file->id;
 		file->notify = notify;
 	}
 	else if (notify->irp)
@@ -589,6 +594,11 @@ BOOL drive_file_notify_change(DRIVE_FILE* file, IRP* irp, BOOL WatchTree, UINT32
 		return FALSE;
 	}
 
+	/* No name in the log: the root of the drive or a directory in it. */
+	WLog_DBG(TAG, "FileId=0x%08" PRIx32 ": waiting for changes in %s (filter 0x%08" PRIx32 "%s)",
+	         file->id,
+	         (_wcslen(file->fullpath) <= _wcslen(file->basepath) + 1) ? "the root" : "a directory",
+	         CompletionFilter, WatchTree ? ", subdirectories too" : "");
 	return TRUE;
 #else
 	WINPR_UNUSED(WatchTree);
