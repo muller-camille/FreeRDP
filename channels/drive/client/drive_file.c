@@ -324,6 +324,10 @@ static BOOL drive_file_init(DRIVE_FILE* file)
 			                       FORMAT_MESSAGE_IGNORE_INSERTS,
 			                   nullptr, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
 			                   (LPSTR)&messageBuffer, 0, nullptr);
+			/* One line: the system message ends with a line break. */
+			while (messageBuffer && (size > 0) &&
+			       ((messageBuffer[size - 1] == '\r') || (messageBuffer[size - 1] == '\n')))
+				messageBuffer[--size] = '\0';
 			char fullpath[MAX_PATH] = WINPR_C_ARRAY_INIT;
 			(void)ConvertWCharToUtf8(file->fullpath, fullpath, sizeof(fullpath));
 			WLog_ERR(TAG, "Error in drive_file_init: %s %s", messageBuffer, fullpath);
