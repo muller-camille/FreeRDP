@@ -1215,6 +1215,18 @@ static BOOL cliprdr_GetUpdatedClipboardFormats(wfClipboard* clipboard, PUINT lpu
 	return TRUE;
 }
 
+/**
+ * Content its owner keeps out of clipboard monitors: password managers mark a copied secret with the
+ * "ExcludeClipboardContentFromMonitorProcessing" format, which the clipboard history and the cloud
+ * clipboard honor. A redirected clipboard is such a monitor: this content is neither announced to the
+ * server nor sent when the server asks for it.
+ */
+static BOOL wf_cliprdr_content_excluded(void)
+{
+	const UINT format = RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
+	return (format != 0) && IsClipboardFormatAvailable(format);
+}
+
 static UINT cliprdr_send_format_list(wfClipboard* clipboard)
 {
 	UINT rc;
@@ -1228,8 +1240,14 @@ static UINT cliprdr_send_format_list(wfClipboard* clipboard)
 	if (!clipboard)
 		return ERROR_INTERNAL_ERROR;
 
+	/* Content kept out of clipboard monitors: an empty list, so that the server drops the formats
+	 * announced before as well (a paste would otherwise ask for them, and get this content). */
+	const BOOL excluded = wf_cliprdr_content_excluded();
+	if (excluded)
+		WLog_DBG(TAG, "local clipboard content excluded from clipboard monitors: not announced");
+
 	/* Ignore if other app is holding clipboard */
-	if (try_open_clipboard(clipboard->hwnd))
+	if (!excluded && try_open_clipboard(clipboard->hwnd))
 	{
 		count = CountClipboardFormats();
 		numFormats = (UINT32)count;
@@ -2161,7 +2179,13 @@ wf_cliprdr_server_format_data_request(CliprdrClientContext* context,
 	const UINT32 requestedFormatId = formatDataRequest->requestedFormatId;
 	BYTE* requestedFormatData = nullptr;
 	SSIZE_T res = 0;
-	if (requestedFormatId == RegisterClipboardFormat(CFSTR_FILEDESCRIPTORW))
+	if (wf_cliprdr_content_excluded())
+	{
+		/* Never announced: a request can only come before the list reached the server. */
+		WLog_DBG(TAG, "local clipboard content excluded from clipboard monitors: request refused");
+		res = -1;
+	}
+	else if (requestedFormatId == RegisterClipboardFormat(CFSTR_FILEDESCRIPTORW))
 	{
 		res = wf_cliprdr_get_filedescriptor(clipboard, &requestedFormatData);
 	}
@@ -2287,6 +2311,17 @@ wf_cliprdr_server_file_contents_request(CliprdrClientContext* context,
 
 	if (!clipboard)
 		return ERROR_INTERNAL_ERROR;
+
+	if (wf_cliprdr_content_excluded())
+	{
+		const CLIPRDR_FILE_CONTENTS_RESPONSE refused = {
+			.common = { .msgType = CB_FILECONTENTS_RESPONSE, .msgFlags = CB_RESPONSE_FAIL },
+			.streamId = fileContentsRequest->streamId
+		};
+
+		WLog_DBG(TAG, "local clipboard content excluded from clipboard monitors: file contents refused");
+		return clipboard->context->ClientFileContentsResponse(clipboard->context, &refused);
+	}
 
 	cbRequested = fileContentsRequest->cbRequested;
 	if (fileContentsRequest->dwFlags == FILECONTENTS_SIZE)
