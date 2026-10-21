@@ -22,16 +22,20 @@
 #include <freerdp/config.h>
 
 #include <winpr/windows.h>
+#include <winpr/winsock.h>
 
 #include <winpr/crt.h>
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <freerdp/freerdp.h>
 #include <freerdp/constants.h>
+#include <freerdp/log.h>
+#include <freerdp/transport_io.h>
 
 #include <freerdp/client/file.h>
 #include <freerdp/client/cmdline.h>
@@ -45,6 +49,8 @@
 
 #include <shellapi.h>
 
+#define TAG CLIENT_TAG("windows")
+
 /* Messages of the frame export: at most one every this many milliseconds by default. */
 #define WF_FRAME_INTERVAL_DEFAULT 100
 
@@ -54,8 +60,154 @@ static COMMAND_LINE_ARGUMENT_A wf_args[] = {
 	  "Write the regions of the remote desktop that change to this pipe, a handle inherited from "
 	  "the parent process: the desktop as decoded, whatever the window shows. At most one message "
 	  "every interval milliseconds (default 100, from 10 to 60000)." },
+	{ "connect-pipe", COMMAND_LINE_VALUE_REQUIRED, "<read-handle>,<write-handle>", nullptr, nullptr,
+	  -1, nullptr,
+	  "Get each connection to the server, reconnections included, from the parent process instead "
+	  "of opening it, through two pipe handles inherited from it: for a server only reachable "
+	  "through a tunnel the parent opens (SSH jump host). For each connection, the port (16 bits), "
+	  "the length (16 bits) and the UTF-8 host name are written to <write-handle>; <read-handle> "
+	  "then gives a 32-bit length and a WSAPROTOCOL_INFOW (WSADuplicateSocket) of a socket already "
+	  "connected to that server, or a length of 0 when the parent did not connect. Little-endian. "
+	  "/v still names the server, for its certificate." },
 	{ nullptr, 0, nullptr, nullptr, nullptr, -1, nullptr, nullptr }
 };
+
+/* A pipe handle of this process, in decimal (as .NET writes it) or hexadecimal with 0x. */
+static BOOL wf_parse_pipe_handle(const char* value, char** end, HANDLE* pipe)
+{
+	const int base = ((value[0] == '0') && ((value[1] == 'x') || (value[1] == 'X'))) ? 16 : 10;
+	errno = 0;
+	const unsigned long long handle = strtoull(value, end, base);
+
+	if ((errno != 0) || (*end == value) || (handle == 0) || (handle > UINTPTR_MAX))
+		return FALSE;
+
+	*pipe = (HANDLE)(uintptr_t)handle;
+	return GetFileType(*pipe) == FILE_TYPE_PIPE;
+}
+
+/* /connect-pipe:<read-handle>,<write-handle> */
+static int wf_parse_connect_pipe(wfContext* wfc, const char* value)
+{
+	char* end = nullptr;
+	HANDLE in = nullptr;
+	HANDLE out = nullptr;
+
+	if (!value || wfc->connectPipeIn || !wf_parse_pipe_handle(value, &end, &in) || (*end != ','))
+		return COMMAND_LINE_ERROR;
+
+	const char* second = end + 1;
+
+	if (!wf_parse_pipe_handle(second, &end, &out) || (*end != '\0') || (in == out))
+		return COMMAND_LINE_ERROR;
+
+	wfc->connectPipeIn = in;
+	wfc->connectPipeOut = out;
+	return 0;
+}
+
+static BOOL wf_connect_pipe_read(HANDLE pipe, void* data, DWORD size)
+{
+	BYTE* bytes = (BYTE*)data;
+	DWORD total = 0;
+
+	while (total < size)
+	{
+		DWORD read = 0;
+
+		if (!ReadFile(pipe, bytes + total, size - total, &read, nullptr) || (read == 0))
+			return FALSE;
+
+		total += read;
+	}
+
+	return TRUE;
+}
+
+static BOOL wf_connect_pipe_write(HANDLE pipe, const void* data, DWORD size)
+{
+	const BYTE* bytes = (const BYTE*)data;
+	DWORD total = 0;
+
+	while (total < size)
+	{
+		DWORD written = 0;
+
+		if (!WriteFile(pipe, bytes + total, size - total, &written, nullptr) || (written == 0))
+			return FALSE;
+
+		total += written;
+	}
+
+	return TRUE;
+}
+
+/* TCPConnect of the transport with /connect-pipe: the parent process connects to the server
+ * (through its tunnel) and gives the socket; it may refuse a host it did not expect (a server
+ * redirection). The timeout is the parent's. */
+static int wf_connect_pipe_tcp(rdpContext* context, rdpSettings* settings, const char* hostname,
+                               int port, DWORD timeout)
+{
+	WINPR_UNUSED(settings);
+	WINPR_UNUSED(timeout);
+
+	wfContext* wfc = (wfContext*)context;
+	WSAPROTOCOL_INFOW info = WINPR_C_ARRAY_INIT;
+	UINT16 request[2] = WINPR_C_ARRAY_INIT;
+	UINT32 length = 0;
+	SOCKET sockfd = INVALID_SOCKET;
+	const size_t hostLength = hostname ? strlen(hostname) : 0;
+
+	WINPR_ASSERT(wfc);
+
+	if ((hostLength == 0) || (hostLength > UINT16_MAX) || (port <= 0) || (port > UINT16_MAX))
+		goto fail;
+
+	request[0] = (UINT16)port;
+	request[1] = (UINT16)hostLength;
+	WLog_DBG(TAG, "connection to %s:%d asked from the parent process", hostname, port);
+
+	if (!wf_connect_pipe_write(wfc->connectPipeOut, request, sizeof(request)) ||
+	    !wf_connect_pipe_write(wfc->connectPipeOut, hostname, (DWORD)hostLength))
+	{
+		WLog_ERR(TAG, "the parent process does not answer the connection request");
+		goto fail;
+	}
+
+	if (!wf_connect_pipe_read(wfc->connectPipeIn, &length, sizeof(length)))
+	{
+		WLog_ERR(TAG, "no connection from the parent process");
+		goto fail;
+	}
+
+	if (length != sizeof(info))
+	{
+		if (length == 0)
+			WLog_ERR(TAG, "the parent process did not connect to %s:%d", hostname, port);
+		else
+			WLog_ERR(TAG, "unexpected answer of %" PRIu32 " bytes from the parent process", length);
+
+		goto fail;
+	}
+
+	if (!wf_connect_pipe_read(wfc->connectPipeIn, &info, sizeof(info)))
+		goto fail;
+
+	sockfd = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &info, 0,
+	                    WSA_FLAG_OVERLAPPED);
+
+	if (sockfd == INVALID_SOCKET)
+	{
+		WLog_ERR(TAG, "socket from the parent process: WSASocketW failed with %d", WSAGetLastError());
+		goto fail;
+	}
+
+	return (int)sockfd;
+
+fail:
+	freerdp_set_last_error_if_not(context, FREERDP_ERROR_CONNECT_FAILED);
+	return -1;
+}
 
 /* /frame-pipe:<handle>[,interval:<ms>]: the handle must be a pipe of this process. */
 static int wf_parse_frame_pipe(wfContext* wfc, const char* value)
@@ -117,6 +269,9 @@ static int wf_handle_option(const COMMAND_LINE_ARGUMENT_A* arg, void* custom)
 
 	if (strcmp(arg->Name, "frame-pipe") == 0)
 		return wf_parse_frame_pipe(wfc, arg->Value);
+
+	if (strcmp(arg->Name, "connect-pipe") == 0)
+		return wf_parse_connect_pipe(wfc, arg->Value);
 
 	return 0;
 }
@@ -200,6 +355,26 @@ INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	}
 
 	AddDefaultSettings(settings);
+
+	if (wfc->connectPipeIn)
+	{
+		/* Kept by the transport through reconnections (see rdp_new_common). */
+		const rdpTransportIo* current = freerdp_get_io_callbacks(context);
+
+		if (!current)
+			goto out;
+
+		rdpTransportIo io = *current;
+		io.TCPConnect = wf_connect_pipe_tcp;
+
+		if (!freerdp_set_io_callbacks(context, &io))
+			goto out;
+
+		/* The parent opens the connection: no proxy from the environment (https_proxy) in
+		 * between, each request names the server. */
+		if (!freerdp_settings_set_uint32(settings, FreeRDP_ProxyType, PROXY_TYPE_IGNORE))
+			goto out;
+	}
 
 	if (freerdp_client_start(context) != 0)
 		goto out;

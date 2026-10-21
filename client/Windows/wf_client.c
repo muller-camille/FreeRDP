@@ -1761,6 +1761,18 @@ static void wfreerdp_client_free(freerdp* instance, rdpContext* context)
 		wfc->framePipe = nullptr;
 	}
 
+	if (wfc->connectPipeIn)
+	{
+		(void)CloseHandle(wfc->connectPipeIn);
+		wfc->connectPipeIn = nullptr;
+	}
+
+	if (wfc->connectPipeOut)
+	{
+		(void)CloseHandle(wfc->connectPipeOut);
+		wfc->connectPipeOut = nullptr;
+	}
+
 #ifdef WITH_PROGRESS_BAR
 	CoUninitialize();
 #endif

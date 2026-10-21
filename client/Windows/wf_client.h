@@ -152,6 +152,11 @@ extern "C"
 		UINT32 frameInterval;
 		struct wf_frames* frames;
 
+		/* /connect-pipe: pipes inherited from the parent process, which gives each connection to
+		 * the server (see wf_connect_pipe_tcp in wfreerdp.c). */
+		HANDLE connectPipeIn;
+		HANDLE connectPipeOut;
+
 		/* Drawing callbacks wrapped for the frame export: their screen to screen copies are
 		 * passed on (see wf_frames_copy). */
 		pScrBlt scrBlt;
