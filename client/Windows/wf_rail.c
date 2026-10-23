@@ -25,6 +25,10 @@
 #include <winpr/print.h>
 
 #include "wf_rail.h"
+#include "wf_cliprdr.h"
+
+/* After the FreeRDP headers: its notification icon macros (NIIF_*) would clash with freerdp/rail.h. */
+#include <shellapi.h>
 
 #define TAG CLIENT_TAG("windows")
 
@@ -306,6 +310,14 @@ LRESULT CALLBACK wf_RailWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 	switch (msg)
 	{
+		case WM_DROPFILES:
+			/* Pasted in the active window of the session, as on the session window. */
+			if (wfc)
+				wf_cliprdr_drop_files(wfc, (HANDLE)wParam);
+			else
+				DragFinish((HDROP)wParam);
+			break;
+
 		case WM_PAINT:
 		{
 			if (!wfc)
@@ -520,6 +532,11 @@ static BOOL wf_rail_window_common(rdpContext* context, const WINDOW_ORDER_INFO* 
 		}
 
 		SetWindowLongPtr(railWindow->hWnd, GWLP_USERDATA, (LONG_PTR)railWindow);
+
+		/* Files dropped on the window: pasted through the redirected clipboard. */
+		if (freerdp_settings_get_bool(wfc->common.context.settings, FreeRDP_RedirectClipboard))
+			DragAcceptFiles(railWindow->hWnd, TRUE);
+
 		rc = HashTable_Insert(wfc->railWindows, (void*)(UINT_PTR)orderInfo->windowId,
 		                      (void*)railWindow);
 		free(titleW);

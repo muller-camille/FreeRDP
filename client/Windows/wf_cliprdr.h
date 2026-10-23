@@ -21,7 +21,12 @@
 
 #include "wf_client.h"
 
+/* Posted to the session window once the server has files dropped on it: paste them (Ctrl+V).
+ * wParam: number of files, lParam: number of folders. */
+#define WM_FREERDP_PASTE_DROPPED (WM_USER + 101)
+
 BOOL wf_cliprdr_init(wfContext* wfc, CliprdrClientContext* cliprdr);
 BOOL wf_cliprdr_uninit(wfContext* wfc, CliprdrClientContext* cliprdr);
+void wf_cliprdr_drop_files(wfContext* wfc, HANDLE drop);
 
 #endif /* FREERDP_CLIENT_WIN_CLIPRDR_H */

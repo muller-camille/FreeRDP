@@ -44,7 +44,11 @@
 
 #include "wf_cliprdr.h"
 
+/* After the FreeRDP headers: its notification icon macros (NIIF_*) would clash with freerdp/rail.h. */
+#include <shellapi.h>
+
 #define TAG CLIENT_TAG("windows")
+#define DROP_TAG CLIENT_TAG("windows.drop")
 
 #ifdef WITH_DEBUG_CLIPRDR
 #define DEBUG_CLIPRDR(...) WLog_DBG(TAG, __VA_ARGS__)
@@ -138,6 +142,19 @@ typedef struct
 	fnAddClipboardFormatListener AddClipboardFormatListener;
 	fnRemoveClipboardFormatListener RemoveClipboardFormatListener;
 	fnGetUpdatedClipboardFormats GetUpdatedClipboardFormats;
+
+	/* Files dropped on a session window (wf_cliprdr_drop_files): put on the local clipboard,
+	 * then pasted in the session once the server has answered the format list announcing them.
+	 * Format lists and their responses are counted: the server answers them in order. */
+	volatile LONG listsSent;
+	volatile LONG listsAnswered;
+	/* Files dropped, their format list not sent yet. */
+	volatile LONG dropAwaited;
+	/* Number of the format list announcing them, 0 if none. */
+	volatile LONG dropList;
+	UINT64 dropTime;
+	UINT32 dropFiles;
+	UINT32 dropFolders;
 } wfClipboard;
 
 #define WM_CLIPRDR_MESSAGE (WM_USER + 156)
@@ -1246,6 +1263,8 @@ static UINT cliprdr_send_format_list(wfClipboard* clipboard)
 	if (excluded)
 		WLog_DBG(TAG, "local clipboard content excluded from clipboard monitors: not announced");
 
+	BOOL files = FALSE;
+
 	/* Ignore if other app is holding clipboard */
 	if (!excluded && try_open_clipboard(clipboard->hwnd))
 	{
@@ -1264,6 +1283,7 @@ static UINT cliprdr_send_format_list(wfClipboard* clipboard)
 
 			if (IsClipboardFormatAvailable(CF_HDROP))
 			{
+				files = TRUE;
 				formats[index++].formatId = RegisterClipboardFormat(CFSTR_FILEDESCRIPTORW);
 				formats[index++].formatId = RegisterClipboardFormat(CFSTR_FILECONTENTS);
 			}
@@ -1294,7 +1314,18 @@ static UINT cliprdr_send_format_list(wfClipboard* clipboard)
 	formatList.numFormats = numFormats;
 	formatList.formats = formats;
 	formatList.common.msgType = CB_FORMAT_LIST;
+
+	/* Counted before it is sent: its response can come before ClientFormatList returns. Files
+	 * dropped on a session window are pasted once the response to this list arrives. */
+	const LONG number = InterlockedIncrement(&clipboard->listsSent);
+	if (files && InterlockedExchange(&clipboard->dropAwaited, 0))
+		(void)InterlockedExchange(&clipboard->dropList, number);
+
 	rc = clipboard->context->ClientFormatList(clipboard->context, &formatList);
+
+	if ((rc != CHANNEL_RC_OK) &&
+	    (InterlockedCompareExchange(&clipboard->dropList, 0, number) == number))
+		WLog_INFO(DROP_TAG, "files dropped: not pasted, the clipboard could not announce them");
 
 	for (UINT index = 0; index < numFormats; index++)
 		free(formats[index].formatName);
@@ -1959,11 +1990,34 @@ static UINT
 wf_cliprdr_server_format_list_response(CliprdrClientContext* context,
                                        const CLIPRDR_FORMAT_LIST_RESPONSE* formatListResponse)
 {
-	(void)context;
-	(void)formatListResponse;
+	wfClipboard* clipboard = (wfClipboard*)context->custom;
+	const BOOL accepted = formatListResponse->common.msgFlags == CB_RESPONSE_OK;
 
-	if (formatListResponse->common.msgFlags != CB_RESPONSE_OK)
+	if (!accepted)
 		WLog_WARN(TAG, "format list update failed");
+
+	if (!clipboard)
+		return CHANNEL_RC_OK;
+
+	/* Response to the format list announcing dropped files: the server has them, the paste
+	 * (Ctrl+V) goes to the window thread. Too late (more than 10 seconds after the drop): not
+	 * pasted, the user may have moved on. */
+	const LONG answered = InterlockedIncrement(&clipboard->listsAnswered);
+	const LONG awaited = clipboard->dropList;
+
+	if ((awaited == 0) || (answered < awaited) ||
+	    (InterlockedCompareExchange(&clipboard->dropList, 0, awaited) != awaited))
+		return CHANNEL_RC_OK;
+
+	const UINT64 elapsed = GetTickCount64() - clipboard->dropTime;
+	if (!accepted)
+		WLog_INFO(DROP_TAG, "files dropped: not pasted, the server refused them");
+	else if (elapsed > 10000)
+		WLog_INFO(DROP_TAG, "files dropped: not pasted, the server answered after %" PRIu64 " ms",
+		          elapsed);
+	else if (!PostMessage(clipboard->wfc->hwnd, WM_FREERDP_PASTE_DROPPED, clipboard->dropFiles,
+	                      clipboard->dropFolders))
+		WLog_INFO(DROP_TAG, "files dropped: not pasted, the session window is gone");
 
 	return CHANNEL_RC_OK;
 }
@@ -2504,6 +2558,134 @@ wf_cliprdr_server_file_contents_response(CliprdrClientContext* context,
 	return CHANNEL_RC_OK;
 }
 
+/**
+ * Files dropped on a session window (WM_DROPFILES): put on the local clipboard, as a copy in the
+ * file explorer would, then pasted in the session (Ctrl+V, see WM_FREERDP_PASTE_DROPPED) once the
+ * server has answered the format list announcing them. They go where a paste goes: the active
+ * window of the session. Refused when the server takes no files from the clipboard, as a paste
+ * would be. Logged without the names of the files.
+ */
+void wf_cliprdr_drop_files(wfContext* wfc, HANDLE dropped)
+{
+	WINPR_ASSERT(wfc);
+
+	HDROP drop = (HDROP)dropped;
+
+	wfClipboard* clipboard = wfc->reconnecting ? nullptr : (wfClipboard*)wfc->clipboard;
+	const UINT count = DragQueryFileW(drop, UINT32_MAX, nullptr, 0);
+	UINT32 files = 0;
+	UINT32 folders = 0;
+	HGLOBAL names = nullptr;
+	HGLOBAL effect = nullptr;
+
+	if (!clipboard || !clipboard->sync)
+	{
+		WLog_INFO(DROP_TAG, "files dropped: refused, the clipboard of the session is not ready");
+		goto out;
+	}
+
+	if ((clipboard->capabilities & CB_STREAM_FILECLIP_ENABLED) == 0)
+	{
+		WLog_INFO(DROP_TAG,
+		          "files dropped: refused, the server does not accept files on the clipboard");
+		goto out;
+	}
+
+	/* CF_HDROP of their full names, as the file explorer puts on the clipboard. */
+	size_t length = 1;
+	for (UINT index = 0; index < count; index++)
+		length += DragQueryFileW(drop, index, nullptr, 0) + 1ull;
+
+	names = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DROPFILES) + length * sizeof(WCHAR));
+	effect = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+	DROPFILES* list = names ? (DROPFILES*)GlobalLock(names) : nullptr;
+	DWORD* copy = effect ? (DWORD*)GlobalLock(effect) : nullptr;
+
+	if (!list || !copy)
+	{
+		if (list)
+			GlobalUnlock(names);
+		if (copy)
+			GlobalUnlock(effect);
+		WLog_INFO(DROP_TAG, "files dropped: refused, out of memory");
+		goto out;
+	}
+
+	list->pFiles = sizeof(DROPFILES);
+	list->fWide = TRUE;
+	WCHAR* name = (WCHAR*)(list + 1);
+	size_t left = length;
+
+	for (UINT index = 0; index < count; index++)
+	{
+		const UINT used = DragQueryFileW(drop, index, name, WINPR_ASSERTING_INT_CAST(UINT, left));
+		if (used == 0)
+			continue;
+
+		const DWORD attributes = GetFileAttributesW(name);
+		if ((attributes != INVALID_FILE_ATTRIBUTES) && (attributes & FILE_ATTRIBUTE_DIRECTORY))
+			folders++;
+		else
+			files++;
+
+		name += used + 1;
+		left -= used + 1ull;
+	}
+
+	*copy = DROPEFFECT_COPY;
+	GlobalUnlock(effect);
+	GlobalUnlock(names);
+
+	if ((files + folders) == 0)
+	{
+		WLog_INFO(DROP_TAG, "files dropped: refused, no file");
+		goto out;
+	}
+
+	if (!try_open_clipboard(wfc->hwnd))
+	{
+		WLog_INFO(DROP_TAG, "files dropped: refused, the clipboard is held by another program");
+		goto out;
+	}
+
+	clipboard->dropFiles = files;
+	clipboard->dropFolders = folders;
+	clipboard->dropTime = GetTickCount64();
+	(void)InterlockedExchange(&clipboard->dropList, 0);
+	(void)InterlockedExchange(&clipboard->dropAwaited, 1);
+
+	/* Owned by the session window, not by the clipboard window: the change is announced to the
+	 * server (see WM_CLIPBOARDUPDATE), which takes the clipboard data as its own. */
+	const BOOL set = EmptyClipboard() && SetClipboardData(CF_HDROP, names);
+	if (set)
+	{
+		names = nullptr;
+		if (SetClipboardData(RegisterClipboardFormat(CFSTR_PREFERREDDROPEFFECT), effect))
+			effect = nullptr;
+	}
+
+	CloseClipboard();
+
+	if (!set)
+	{
+		(void)InterlockedExchange(&clipboard->dropAwaited, 0);
+		WLog_INFO(DROP_TAG, "files dropped: refused, the clipboard could not take them");
+		goto out;
+	}
+
+	WLog_INFO(DROP_TAG,
+	          "files dropped: %" PRIu32 " file(s), %" PRIu32 " folder(s) put on the clipboard, "
+	          "pasted once the server has them",
+	          files, folders);
+
+out:
+	if (names)
+		GlobalFree(names);
+	if (effect)
+		GlobalFree(effect);
+	DragFinish(drop);
+}
+
 BOOL wf_cliprdr_init(wfContext* wfc, CliprdrClientContext* cliprdr)
 {
 	wfClipboard* clipboard;
@@ -2583,6 +2765,8 @@ BOOL wf_cliprdr_uninit(wfContext* wfc, CliprdrClientContext* cliprdr)
 		return FALSE;
 
 	cliprdr->custom = nullptr;
+	/* Not used any more by a drop on the session window (see wf_cliprdr_drop_files). */
+	wfc->clipboard = nullptr;
 
 	if (clipboard->hwnd)
 		PostMessage(clipboard->hwnd, WM_QUIT, 0, 0);
