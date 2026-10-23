@@ -72,14 +72,66 @@ static BOOL alt_ctrl_down(void)
 	return altDown && ctrl_down();
 }
 
+/**
+ * Sends a key to the session: scan code and extended flag as Windows gives them (those of the
+ * virtual key when there is no scan code: keys injected by auto-type or on-screen keyboards, or
+ * posted by the parent window), with the fixes for NumLock, Pause and right Shift.
+ */
+static void wf_event_send_key(wfContext* wfc, DWORD vkCode, DWORD scanCode, BOOL extended, BOOL up)
+{
+	rdpInput* input = wfc->common.context.input;
+
+	if ((scanCode == 0) && (vkCode != 0) && (vkCode != VK_PACKET))
+	{
+		const UINT code = MapVirtualKeyW(vkCode, MAPVK_VK_TO_VSC_EX);
+		scanCode = code & 0xFF;
+		if ((code & 0xFF00) == 0xE000)
+			extended = TRUE;
+	}
+
+	DWORD rdp_scancode = MAKE_RDP_SCANCODE((BYTE)scanCode, extended);
+	const BOOL keystate = g_keystates[scanCode & 0xFF];
+	g_keystates[scanCode & 0xFF] = !up;
+
+	if (rdp_scancode == RDP_SCANCODE_NUMLOCK_EXTENDED)
+	{
+		/* Windows sends NumLock as extended - rdp doesn't */
+		DEBUG_KBD("hack: NumLock (x45) should not be extended");
+		rdp_scancode = RDP_SCANCODE_NUMLOCK;
+	}
+	else if (rdp_scancode == RDP_SCANCODE_NUMLOCK)
+	{
+		/* Windows sends Pause as if it was a RDP NumLock (handled above).
+		 * It must however be sent as a one-shot Ctrl+NumLock */
+		if (!up)
+		{
+			DEBUG_KBD("Pause, sent as Ctrl+NumLock");
+			freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE, RDP_SCANCODE_LCONTROL);
+			freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE, RDP_SCANCODE_NUMLOCK);
+			freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE, RDP_SCANCODE_LCONTROL);
+			freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE, RDP_SCANCODE_NUMLOCK);
+		}
+		else
+		{
+			DEBUG_KBD("Pause up");
+		}
+
+		return;
+	}
+	else if (rdp_scancode == RDP_SCANCODE_RSHIFT_EXTENDED)
+	{
+		DEBUG_KBD("right shift (x36) should not be extended");
+		rdp_scancode = RDP_SCANCODE_RSHIFT;
+	}
+
+	freerdp_input_send_keyboard_event_ex(input, !up, keystate, rdp_scancode);
+}
+
 LRESULT CALLBACK wf_ll_kbd_proc(int nCode, WPARAM wParam, LPARAM lParam)
 {
 	DWORD ext_proc_id = 0;
 
 	wfContext* wfc = nullptr;
-	DWORD rdp_scancode;
-	BOOL keystate;
-	rdpInput* input;
 	PKBDLLHOOKSTRUCT p;
 
 	DEBUG_KBD("Low-level keyboard hook, hWnd %X nCode %X wParam %X", g_focus_hWnd, nCode, wParam);
@@ -128,36 +180,6 @@ LRESULT CALLBACK wf_ll_kbd_proc(int nCode, WPARAM wParam, LPARAM lParam)
 				if (wfc->reconnecting)
 					return CallNextHookEx(nullptr, nCode, wParam, lParam);
 
-				input = wfc->common.context.input;
-				{
-					/* Keys injected without a scan code (auto-type, on-screen keyboards)
-					 * get the one of their virtual key, instead of an empty one. */
-					DWORD scanCode = p->scanCode;
-					DWORD extended = p->flags & LLKHF_EXTENDED;
-					if ((scanCode == 0) && (p->vkCode != 0) && (p->vkCode != VK_PACKET))
-					{
-						const UINT code = MapVirtualKeyW(p->vkCode, MAPVK_VK_TO_VSC_EX);
-						scanCode = code & 0xFF;
-						if ((code & 0xFF00) == 0xE000)
-							extended = LLKHF_EXTENDED;
-					}
-
-					rdp_scancode = MAKE_RDP_SCANCODE((BYTE)scanCode, extended);
-					keystate = g_keystates[scanCode & 0xFF];
-
-					switch (wParam)
-					{
-						case WM_KEYDOWN:
-						case WM_SYSKEYDOWN:
-							g_keystates[scanCode & 0xFF] = TRUE;
-							break;
-						case WM_KEYUP:
-						case WM_SYSKEYUP:
-						default:
-							g_keystates[scanCode & 0xFF] = FALSE;
-							break;
-					}
-				}
 				DEBUG_KBD("keydown %d scanCode 0x%08lX flags 0x%08lX vkCode 0x%08lX",
 				          (wParam == WM_KEYDOWN), p->scanCode, p->flags, p->vkCode);
 
@@ -173,43 +195,8 @@ LRESULT CALLBACK wf_ll_kbd_proc(int nCode, WPARAM wParam, LPARAM lParam)
 					}
 				}
 
-				if (rdp_scancode == RDP_SCANCODE_NUMLOCK_EXTENDED)
-				{
-					/* Windows sends NumLock as extended - rdp doesn't */
-					DEBUG_KBD("hack: NumLock (x45) should not be extended");
-					rdp_scancode = RDP_SCANCODE_NUMLOCK;
-				}
-				else if (rdp_scancode == RDP_SCANCODE_NUMLOCK)
-				{
-					/* Windows sends Pause as if it was a RDP NumLock (handled above).
-					 * It must however be sent as a one-shot Ctrl+NumLock */
-					if (wParam == WM_KEYDOWN)
-					{
-						DEBUG_KBD("Pause, sent as Ctrl+NumLock");
-						freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE,
-						                                     RDP_SCANCODE_LCONTROL);
-						freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE,
-						                                     RDP_SCANCODE_NUMLOCK);
-						freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE,
-						                                     RDP_SCANCODE_LCONTROL);
-						freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE,
-						                                     RDP_SCANCODE_NUMLOCK);
-					}
-					else
-					{
-						DEBUG_KBD("Pause up");
-					}
-
-					return 1;
-				}
-				else if (rdp_scancode == RDP_SCANCODE_RSHIFT_EXTENDED)
-				{
-					DEBUG_KBD("right shift (x36) should not be extended");
-					rdp_scancode = RDP_SCANCODE_RSHIFT;
-				}
-
-				freerdp_input_send_keyboard_event_ex(input, !(p->flags & LLKHF_UP), keystate,
-				                                     rdp_scancode);
+				wf_event_send_key(wfc, p->vkCode, p->scanCode, (p->flags & LLKHF_EXTENDED) != 0,
+				                  (p->flags & LLKHF_UP) != 0);
 
 				if (p->vkCode == VK_NUMLOCK || p->vkCode == VK_CAPITAL || p->vkCode == VK_SCROLL ||
 				    p->vkCode == VK_KANA)
@@ -779,6 +766,35 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 
 			case WM_DROPFILES:
 				wf_cliprdr_drop_files(wfc, (HANDLE)wParam);
+				break;
+
+			case WM_KEYDOWN:
+			case WM_SYSKEYDOWN:
+			case WM_KEYUP:
+			case WM_SYSKEYUP:
+				/* Embedded (/parent-window): the low-level hook takes the keyboard while the parent
+				 * window has the focus, and these messages then go to the parent. Those that reach
+				 * this window instead (focus given to it, keys posted by the parent) go to the
+				 * session the same way, instead of being lost. */
+				if (wfc->hWndParent && !wfc->reconnecting)
+				{
+					wf_event_send_key(wfc, (DWORD)wParam, (DWORD)((lParam >> 16) & 0xFF),
+					                  ((lParam >> 24) & 1) != 0,
+					                  (Msg == WM_KEYUP) || (Msg == WM_SYSKEYUP));
+				}
+				else
+				{
+					processed = FALSE;
+				}
+
+				break;
+
+			case WM_CHAR:
+			case WM_SYSCHAR:
+			case WM_DEADCHAR:
+			case WM_SYSDEADCHAR:
+				/* Embedded: characters of the keys above, already sent as keys (no menu, no beep). */
+				processed = wfc->hWndParent != nullptr;
 				break;
 
 			case WM_FREERDP_PASTE_DROPPED:
