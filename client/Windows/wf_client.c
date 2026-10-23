@@ -67,6 +67,9 @@
 
 #include "resource/resource.h"
 
+/* After the FreeRDP headers: its notification icon macros (NIIF_*) would clash with freerdp/rail.h. */
+#include <shellapi.h>
+
 #define TAG CLIENT_TAG("windows")
 
 #define WM_FREERDP_SHOWWINDOW (WM_USER + 100)
@@ -523,6 +526,11 @@ static BOOL wf_post_connect_session(freerdp* instance)
 			return FALSE;
 		}
 		SetWindowLongPtr(wfc->hwnd, GWLP_USERDATA, (LONG_PTR)wfc);
+
+		/* Files dropped on the session are pasted in it through the redirected clipboard (see
+		 * wf_cliprdr_drop_files): accepted only with it. */
+		if (freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard))
+			DragAcceptFiles(wfc->hwnd, TRUE);
 	}
 
 	wf_resize_window(wfc);

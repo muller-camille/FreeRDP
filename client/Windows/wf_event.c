@@ -31,6 +31,7 @@
 
 #include "wf_gdi.h"
 #include "wf_event.h"
+#include "wf_cliprdr.h"
 
 #include <freerdp/event.h>
 
@@ -233,6 +234,47 @@ LRESULT CALLBACK wf_ll_kbd_proc(int nCode, WPARAM wParam, LPARAM lParam)
 	}
 
 	return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
+
+/**
+ * Files dropped on the session window, now on the clipboard of the session: pasted (Ctrl+V) in
+ * its active window. Input is suspended while the window has no focus, which is the case after a
+ * drag from another window: the keys are sent all the same, as typed.
+ */
+static void wf_event_paste_dropped(wfContext* wfc, UINT32 files, UINT32 folders)
+{
+	if (wfc->reconnecting)
+	{
+		WLog_INFO(CLIENT_TAG("windows.drop"), "files dropped: not pasted, reconnecting");
+		return;
+	}
+
+	rdpInput* input = wfc->common.context.input;
+	rdpSettings* settings = wfc->common.context.settings;
+	const BOOL suspended = freerdp_settings_get_bool(settings, FreeRDP_SuspendInput);
+
+	if (!freerdp_settings_set_bool(settings, FreeRDP_SuspendInput, FALSE))
+	{
+		WLog_INFO(CLIENT_TAG("windows.drop"), "files dropped: not pasted, the keys were not sent");
+		return;
+	}
+
+	const BOOL sent =
+	    freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE, RDP_SCANCODE_LCONTROL) &&
+	    freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE, RDP_SCANCODE_KEY_V) &&
+	    freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE, RDP_SCANCODE_KEY_V) &&
+	    freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE, RDP_SCANCODE_LCONTROL);
+
+	if (!freerdp_settings_set_bool(settings, FreeRDP_SuspendInput, suspended))
+		WLog_WARN(CLIENT_TAG("windows.drop"), "input suspension not restored after the paste");
+
+	if (sent)
+		WLog_INFO(CLIENT_TAG("windows.drop"),
+		          "files dropped: %" PRIu32 " file(s), %" PRIu32
+		          " folder(s) pasted in the session (Ctrl+V)",
+		          files, folders);
+	else
+		WLog_INFO(CLIENT_TAG("windows.drop"), "files dropped: not pasted, the keys were not sent");
 }
 
 void wf_event_focus_in(wfContext* wfc)
@@ -733,6 +775,14 @@ LRESULT CALLBACK wf_event_proc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam
 				else
 					DefWindowProc(hWnd, Msg, wParam, lParam);
 
+				break;
+
+			case WM_DROPFILES:
+				wf_cliprdr_drop_files(wfc, (HANDLE)wParam);
+				break;
+
+			case WM_FREERDP_PASTE_DROPPED:
+				wf_event_paste_dropped(wfc, (UINT32)wParam, (UINT32)lParam);
 				break;
 
 			case WM_HSCROLL:
