@@ -1318,6 +1318,90 @@ static BOOL wf_auto_reconnect(wfContext* wfc)
 	return TRUE;
 }
 
+/* Longest wait for the end of the session (channels, redirected drives, sound device) before the
+ * client ends by itself. */
+#define WF_DISCONNECT_TIMEOUT_MS 10000
+
+static DWORD WINAPI wf_disconnect_thread(LPVOID arg)
+{
+	freerdp* instance = (freerdp*)arg;
+	WINPR_ASSERT(instance);
+
+	(void)freerdp_disconnect(instance);
+	return 0;
+}
+
+/**
+ * End of the session (ended by the server, window closed, connection lost for good): the channels,
+ * redirected drives and sound device are closed on their own thread, while this thread, which owns
+ * the session window, keeps taking its messages, as during an automatic reconnection (see
+ * wf_auto_reconnect): an embedded window shares its input queue with the window of the parent
+ * application, and a closing that takes its time must not freeze it. There is no session any more:
+ * input is dropped and the window is painted plain.
+ * A disconnection still running after WF_DISCONNECT_TIMEOUT_MS ends the process with the last
+ * error, which tells why the session ended: a closing that never finished left a hung window and
+ * a client running for hours after the server had ended the session.
+ */
+static void wf_disconnect(wfContext* wfc)
+{
+	WINPR_ASSERT(wfc);
+
+	rdpContext* context = &wfc->common.context;
+	freerdp* instance = context->instance;
+
+	/* No session from now on: the same guards as during an automatic reconnection (keyboard hook,
+	 * keys, focus, display updates, dropped files). */
+	(void)InterlockedExchange(&wfc->reconnecting, TRUE);
+	HANDLE thread = CreateThread(nullptr, 0, wf_disconnect_thread, instance, 0, nullptr);
+	if (!thread)
+	{
+		(void)freerdp_disconnect(instance);
+		return;
+	}
+
+	const ULONGLONG deadline = GetTickCount64() + WF_DISCONNECT_TIMEOUT_MS;
+	for (;;)
+	{
+		const ULONGLONG now = GetTickCount64();
+		const DWORD left = (now < deadline) ? (DWORD)(deadline - now) : 0;
+		const DWORD status = MsgWaitForMultipleObjects(1, &thread, FALSE, left, QS_ALLINPUT);
+		if (status == WAIT_OBJECT_0)
+			break;
+
+		/* Timed out, failed, or still flooded with messages past the deadline. */
+		if ((status != WAIT_OBJECT_0 + 1) || (GetTickCount64() >= deadline))
+		{
+			const UINT32 error = freerdp_get_last_error(context);
+			WLog_WARN(TAG,
+			          "Disconnection not over after %d s: the client ends (%s [0x%08" PRIX32 "])",
+			          WF_DISCONNECT_TIMEOUT_MS / 1000, freerdp_get_last_error_name(error), error);
+			(void)TerminateProcess(GetCurrentProcess(), error);
+			break;
+		}
+
+		/* Messages sent to the window (by the parent too) are answered within PeekMessage. */
+		MSG msg = WINPR_C_ARRAY_INIT;
+		while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
+		{
+			if (msg.message == WM_PAINT)
+			{
+				PAINTSTRUCT ps = WINPR_C_ARRAY_INIT;
+				HDC hdc = BeginPaint(msg.hwnd, &ps);
+				if (hdc)
+				{
+					(void)FillRect(hdc, &ps.rcPaint, (HBRUSH)GetStockObject(GRAY_BRUSH));
+					(void)EndPaint(msg.hwnd, &ps);
+				}
+			}
+
+			/* Nothing else to do without a session: input, timers, size, close, quit. */
+		}
+	}
+
+	(void)WaitForSingleObject(thread, INFINITE);
+	(void)CloseHandle(thread);
+}
+
 static DWORD WINAPI wf_client_thread(LPVOID lpParam)
 {
 	MSG msg = WINPR_C_ARRAY_INIT;
@@ -1445,7 +1529,7 @@ static DWORD WINAPI wf_client_thread(LPVOID lpParam)
 	}
 
 	/* cleanup */
-	freerdp_disconnect(instance);
+	wf_disconnect(wfc);
 
 end:
 	error = freerdp_get_last_error(instance->context);
